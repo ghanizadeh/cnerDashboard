@@ -242,7 +242,7 @@ def render():
 
     # ── Tab 5: 3D Scatter ───────────────────────────────────────────────
     with tab5:
-        st.markdown("#### 📊 3D Scatter Plotsddddd")
+        st.markdown("#### 📊 3D Scatter Plots")
         if len(num_cols) >= 2:
             c1, c2, c3 = st.columns(3)
             # X axis
