@@ -104,7 +104,7 @@ with st.sidebar:
         st.markdown("#### Tools")
         sub_selection = option_menu(
             menu_title=None,
-            options=["Foam Performance Calculator" ,"Foam Half-Life Calculator", "Foam Stability (14/30 days))"],
+            options=["Foam Performance Calculator" ,"Foam Half-Life Calculator", "Foam Stability (14/30 days)"],
             icons=["calculator", "calculator", "calculator"],
             default_index=0,
             key="extra_tool_menu",
