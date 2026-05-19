@@ -13,51 +13,115 @@ from __future__ import annotations
 
 from typing import Union
 import io
-
 import pandas as pd
 
+def load_table(file, sheet_name=None):
+
+    # -------------------------
+    # Read file
+    # -------------------------
+    if file.name.endswith(".csv"):
+
+        try:
+            df = pd.read_csv(file, encoding="utf-8")
+
+        except UnicodeDecodeError:
+            file.seek(0)
+            df = pd.read_csv(file, encoding="cp1252")
+
+    elif file.name.endswith(".xlsx"):
+
+        df = pd.read_excel(
+            file,
+            sheet_name=sheet_name,
+            engine="openpyxl"
+        )
+
+    else:
+        raise ValueError("Unsupported file format")
+
+    # -------------------------
+    # Remove Excel hidden chars
+    # -------------------------
+    df = df.replace(r"\xa0", "", regex=True)
+    df = df.replace(r"Â", "", regex=True)
+
+    # Clean column names
+    df.columns = df.columns.str.strip()
+
+    # Strip whitespace from text columns
+    for col in df.select_dtypes(include="object"):
+        df[col] = df[col].astype(str).str.strip()
+
+    # Empty string -> NaN
+    df = df.replace("", pd.NA)
+
+    return df
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def read_csv_safe(source: Union[str, io.IOBase]) -> pd.DataFrame:
+def load_data_safe(source: Union[str, io.IOBase], sheet_name: str = None) -> pd.DataFrame:
     """
-    Read a CSV file from a file path or a Streamlit UploadedFile object.
-
-    Handles common Excel-exported CSV artefacts:
-      - UTF-8 BOM (``encoding_errors='replace'``)
-      - Trailing whitespace in column names (stripped by ``deduplicate_columns``)
-
-    Parameters
-    ----------
-    source : str or file-like
-        File path string or Streamlit ``UploadedFile`` / any ``io.IOBase``.
-
-    Returns
-    -------
-    pd.DataFrame
-        Parsed DataFrame with deduplicated column names.
-
-    Raises
-    ------
-    ValueError
-        If the file cannot be parsed as CSV or is completely empty.
+    Read CSV or Excel safely, handling encoding and cleaning hidden characters.
     """
+    if source is None:
+        return pd.DataFrame()
+
+    # 1. Read the file based on extension
+    file_name = getattr(source, "name", "")
+    
     try:
-        df = pd.read_csv(source, encoding="utf-8-sig")
-    except UnicodeDecodeError:
-        # Fall back to latin-1 for legacy Excel exports
-        if hasattr(source, "seek"):
-            source.seek(0)
-        df = pd.read_csv(source, encoding="latin-1")
-    except Exception as exc:
-        raise ValueError(f"Could not read CSV file: {exc}") from exc
+        if file_name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(source, sheet_name=sheet_name, engine="openpyxl")
+        else:
+            # Try UTF-8, fallback to cp1252 for Excel-style CSVs
+            try:
+                if hasattr(source, "seek"): source.seek(0)
+                df = pd.read_csv(source, encoding="utf-8")
+            except (UnicodeDecodeError, pd.errors.ParserError):
+                if hasattr(source, "seek"): source.seek(0)
+                df = pd.read_csv(source, encoding="cp1252")
+    except Exception as e:
+        raise ValueError(f"Could not read file: {e}")
 
     if df.empty:
-        raise ValueError("The uploaded CSV file is empty.")
+        raise ValueError("The uploaded file is empty.")
 
+    # 2. Clean 'Â' and Non-breaking spaces (\xa0)
+    # We replace them with a standard space or empty string to prevent encoding errors
+    import re
+
+    def clean_text(text):
+        if isinstance(text, str):
+
+            text = (
+                text.replace("\xa0", " ")
+                    .replace("Â", "")
+                    .replace("*", "")
+            )
+
+            # Remove extra spaces
+            text = re.sub(r"\s+", " ", text)
+
+            return text.strip()
+
+        return text
+
+    # Clean Column Headers (Crucial for the "Â" issue)
+    df.columns = [clean_text(str(col)) for col in df.columns]
+
+    # Clean Data Cells
+    for col in df.select_dtypes(include="object"):
+        df[col] = df[col].apply(clean_text)
+
+    # 3. Final cleaning: Empty strings to NaN
+    df = df.replace(r'^\s*$', pd.NA, regex=True)
+    
+    # 4. Deduplicate Column Names
     df = deduplicate_columns(df)
+
     return df
 
 
@@ -84,9 +148,8 @@ def deduplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         New DataFrame with unique column names (same data, same order).
     """
-    new_cols: list[str] = []
-    seen: dict[str, int] = {}
-
+    new_cols = []
+    seen = {}
     for col in df.columns:
         if col not in seen:
             seen[col] = 0
@@ -94,7 +157,5 @@ def deduplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
         else:
             seen[col] += 1
             new_cols.append(f"{col}.{seen[col]}")
-
-    df = df.copy()
     df.columns = new_cols
     return df

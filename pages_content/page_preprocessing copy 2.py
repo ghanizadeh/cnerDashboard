@@ -41,7 +41,7 @@ from core.data.foam_feature_engineering import GRP_CLR
 # ── Auto-ML–style group taxonomy (mirrors page_auto_ml.py) ───────────────────
 GROUPS: dict[str, list[str]] = {
     "Nanoparticle": ["HS (%)", "BLH5 (%)", "HSA (%)"],
-    "Anionic":      ["AOS (%)", "alpha-step (%)", "a-step (%)", "SDS (%)", "SLES (%)",
+    "Anionic":      ["AOS (%)", "alpha-step (%)", "SDS (%)", "SLES (%)",
                      "n. LABS (%)", "DB45 (%)", "Cola SLAA (%)", "Cola SC (%)"],
     "Nonionic":     ["APG (%)", "decyl glucoside (%)", "caprylyl glucoside (%)",
                      "Tween 80 (%)", "PG (%)", "LAO (%)"],
@@ -53,8 +53,6 @@ GROUPS: dict[str, list[str]] = {
     "Citric":       ["Citric (%)",
                      "31.2(%) citric+ 13.3(%) KOH  (pH not adjusted, pH=4.46 )",
                      "31.2% citric+ 13.3% KOH  (adjusted pH=4) (%)",
-                     "31.2% citric+ 13.3% KOH (not adjusted pH) (%)",   
-                     "31.2% citric+ 13.3% KOH (pH=4) (%)",
                      "38.1% citric+   KOH  (pH=5) (%)",
                      "potassium citrate (9.7%)/citric acid buffer (19.22%)  pH=3 (%)",
                      "potassium citrate (%)"],
@@ -432,54 +430,45 @@ def render():
 
     all_cols = list(df_raw.columns)
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Feature & Target Selection
-    # ══════════════════════════════════════════════════════════════════════
-    st.markdown("### 📌 Feature & Target Selection")
-    with st.expander("Select features and target column", expanded=True):
-        selected_features, selected_target = render_column_selector(
-            df_raw,
-            default_features=get_value("data.feature_names"),
-            default_target=get_value("data.target_name"),
-            key_prefix="prep",
-        )
-
-    if not selected_features or selected_target is None:
-        st.info("Select at least one feature and a target column above, then continue.")
-        st.stop()
-
+    # ── Target selection (needed early for correlation in step 4) ─────────
+    st.markdown("### 📌 Target Selection")
+    default_target = get_value("data.target_name") or all_cols[-1]
+    if default_target not in all_cols:
+        default_target = all_cols[-1]
+    selected_target = st.selectbox(
+        "Target column",
+        all_cols,
+        index=all_cols.index(default_target),
+        key="prep_target_sel",
+    )
     non_target = [c for c in all_cols if c != selected_target]
 
-    # Working data reset when selection changes
-    sel_key = tuple(sorted(selected_features)) + (selected_target,)
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 1 — Data Filtering
+    # ══════════════════════════════════════════════════════════════════════
+    _section_header("🔍", 1, "Data Filtering",
+                    "Filter rows sent to the model. Filters are non-destructive — adjust any time.")
+
+    # Guard: working_data_base reset when target changes
+    sel_key = (selected_target,)
     if sel_key != st.session_state.get("prep_selection_key") or "working_data_base" not in st.session_state:
-        st.session_state.working_data_base      = df_raw[selected_features + [selected_target]].copy()
+        st.session_state.working_data_base      = df_raw.copy()
         st.session_state.prep_selection_key     = sel_key
         st.session_state.prep_confirmed_outlier = False
         st.session_state.pop("prep_outlier_params", None)
 
     data = st.session_state.working_data_base.copy()
+    data = render_data_filters(data, key_prefix="prep")
 
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION 1 — Target Conversion
+    # SECTION 2 — Target Conversion
     # ══════════════════════════════════════════════════════════════════════
     y_converted = _render_target_conversion(data, selected_target)
     task_mode   = st.session_state.get("tconv_task", "regression")
-
-    st.divider()
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION 2 — Data Filtering
-    # ══════════════════════════════════════════════════════════════════════
-    _section_header("🔍", 2, "Data Filtering",
-                    "Filter rows sent to the model. Filters are non-destructive — adjust any time.")
-    data = render_data_filters(data, key_prefix="prep")
-
-    # Align y to filtered rows
-    y_converted = y_converted.loc[data.index].reset_index(drop=True)
-    data        = data.reset_index(drop=True)
 
     st.divider()
 
@@ -511,7 +500,7 @@ def render():
                     label_visibility="collapsed",
                 )
 
-    st.markdown("##### 🌊 Brine & 🛢️ Oil compositions")
+    st.markdown("##### 🌊 Brine & 🛢️ Oil")
     bp_cols = st.columns(2)
     for ci, grp in enumerate(["Oil", "Brine"]):
         with bp_cols[ci]:
@@ -861,13 +850,14 @@ def render():
 
     X_preview = data[feat_cols_final].copy()
 
-    #_render_final_overview(X_preview, y_converted, fg, task_mode)
-    #st.divider()
+    _render_final_overview(X_preview, y_converted, fg, task_mode)
+
+    st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
     # SECTION 9 — Unscaled Data Preview
     # ══════════════════════════════════════════════════════════════════════
-    _section_header("🔬", 5, "Unscaled Data Preview",
+    _section_header("🔬", 9, "Unscaled Data Preview",
                     "Inspect the final dataset in original units before any scaling. "
                     "Use this to verify filters, engineered features and outlier removal are correct.")
 
@@ -937,58 +927,58 @@ def render():
         st.dataframe(display_df, use_container_width=True, height=420)
 
         # ── Descriptive stats ─────────────────────────────────────────────
-        # with st.expander("📈 Descriptive statistics (unscaled)"):
-        #     num_prev = display_df.select_dtypes(include="number").columns.tolist()
-        #     if num_prev:
-        #         desc = display_df[num_prev].describe().T
-        #         desc["missing %"] = (
-        #             display_df[num_prev].isnull().mean() * 100
-        #         ).round(2)
-        #         st.dataframe(
-        #             desc.style
-        #                 .format("{:.4f}", na_rep="—")
-        #                 .background_gradient(subset=["missing %"], cmap="Oranges"),
-        #             use_container_width=True,
-        #         )
-        #     else:
-        #         st.info("No numeric columns in current selection.")
+        with st.expander("📈 Descriptive statistics (unscaled)"):
+            num_prev = display_df.select_dtypes(include="number").columns.tolist()
+            if num_prev:
+                desc = display_df[num_prev].describe().T
+                desc["missing %"] = (
+                    display_df[num_prev].isnull().mean() * 100
+                ).round(2)
+                st.dataframe(
+                    desc.style
+                        .format("{:.4f}", na_rep="—")
+                        .background_gradient(subset=["missing %"], cmap="Oranges"),
+                    use_container_width=True,
+                )
+            else:
+                st.info("No numeric columns in current selection.")
 
         # ── Distribution spot-check ───────────────────────────────────────
-        # with st.expander("📊 Distribution spot-check"):
-        #     num_opts = [c for c in sel_prev_cols
-        #                 if pd.api.types.is_numeric_dtype(X_preview[c])]
-        #     cat_opts = ["(none)"] + [
-        #         c for c in display_df.columns
-        #         if not pd.api.types.is_numeric_dtype(display_df[c])
-        #     ]
-        #     sp1, sp2 = st.columns([2, 3])
-        #     if num_opts:
-        #         spot_col   = sp1.selectbox("Feature to plot", num_opts, key="preview_spot_col")
-        #         color_col  = sp2.selectbox("Colour by",       cat_opts, key="preview_spot_color")
-        #         import plotly.express as _px
-        #         if color_col == "(none)":
-        #             fig_sp = _px.histogram(
-        #                 display_df, x=spot_col, nbins=40,
-        #                 title=f"Distribution of  {spot_col}  (original scale)",
-        #                 template="plotly_white",
-        #                 color_discrete_sequence=["#1565C0"],
-        #             )
-        #         else:
-        #             fig_sp = _px.histogram(
-        #                 display_df, x=spot_col, color=color_col,
-        #                 nbins=40, barmode="overlay", opacity=0.7,
-        #                 title=f"{spot_col}  by  {color_col}",
-        #                 template="plotly_white",
-        #             )
-        #         fig_sp.update_layout(height=300, margin=dict(t=40, b=10, l=10, r=10))
-        #         st.plotly_chart(fig_sp, use_container_width=True)
-        #     else:
-        #         st.info("No numeric columns selected.")
+        with st.expander("📊 Distribution spot-check"):
+            num_opts = [c for c in sel_prev_cols
+                        if pd.api.types.is_numeric_dtype(X_preview[c])]
+            cat_opts = ["(none)"] + [
+                c for c in display_df.columns
+                if not pd.api.types.is_numeric_dtype(display_df[c])
+            ]
+            sp1, sp2 = st.columns([2, 3])
+            if num_opts:
+                spot_col   = sp1.selectbox("Feature to plot", num_opts, key="preview_spot_col")
+                color_col  = sp2.selectbox("Colour by",       cat_opts, key="preview_spot_color")
+                import plotly.express as _px
+                if color_col == "(none)":
+                    fig_sp = _px.histogram(
+                        display_df, x=spot_col, nbins=40,
+                        title=f"Distribution of  {spot_col}  (original scale)",
+                        template="plotly_white",
+                        color_discrete_sequence=["#1565C0"],
+                    )
+                else:
+                    fig_sp = _px.histogram(
+                        display_df, x=spot_col, color=color_col,
+                        nbins=40, barmode="overlay", opacity=0.7,
+                        title=f"{spot_col}  by  {color_col}",
+                        template="plotly_white",
+                    )
+                fig_sp.update_layout(height=300, margin=dict(t=40, b=10, l=10, r=10))
+                st.plotly_chart(fig_sp, use_container_width=True)
+            else:
+                st.info("No numeric columns selected.")
 
         # ── Download ──────────────────────────────────────────────────────
         st.download_button(
-            "⬇️ Download as CSV",
-            data=X_preview.to_csv(index=False).encode(),
+            "⬇️ Download this view as CSV",
+            data=display_df.to_csv(index=False).encode(),
             file_name="unscaled_preview.csv",
             mime="text/csv",
         )

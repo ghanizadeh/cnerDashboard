@@ -3,26 +3,23 @@ pages_content/page_safe_region.py
 ===================================
 🟢 Safe Region & Optimizer
 
-Original-scale policy
----------------------
-ALL feature values shown to the user (bounds, recommended ranges, top-K table,
-plots) come from original (unscaled) data.
+Ported from code0/tabs/safe_region.py into the refactored architecture.
+Safe Region Search, Active Learning, and Bayesian Optimization live here
+— NOT in the sidebar.
 
-The model only ever sees scaled data internally.
-We store TWO versions of the synthetic data:
-  - synth_orig  → original scale (for display, ranges, plots)
-  - synth_scaled → scaled (for model scoring)
-We NEVER use inverse_transform on scored DataFrames because the score columns
-(safe_probability, objective_score, etc.) are not feature columns and must not
-be transformed.
+No changes to existing optimisation logic — only re-wired to use
+refactored session state (get_value / set_state).
 """
 from __future__ import annotations
 
-import numpy as np
+from typing import Optional
+
 import pandas as pd
 import streamlit as st
 
 from state.session import init_state, get_value, set_state
+
+# ── Optimisation core (ported from code0) ────────────────────────────────────
 from core.models.optimisation import (
     sample_uniform,
     sample_dirichlet_mixture,
@@ -36,105 +33,60 @@ from core.models.optimisation import (
     bayesian_optimise,
     suggest_next_experiments,
 )
+
+# ── Plots (ported from code0) ─────────────────────────────────────────────────
 from utils.plots_safe_region import (
     plot_safe_region_2d,
     plot_safe_region_3d,
     plot_bo_history,
 )
 
-_MIN_SYNTH      = 100
-_DECIMAL_PLACES = 2
+_MIN_SYNTH       = 100
+_DECIMAL_PLACES  = 2
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_X_train_orig(X_train: pd.DataFrame) -> pd.DataFrame:
+def _render_constraint_controls(features: list[str], X_train: pd.DataFrame) -> dict:
     """
-    Return unscaled version of X_train.
-    Uses saved data.X_original (pre-scaling DataFrame).
-    Falls back to X_train when no scaler was applied.
-    """
-    X_orig_full = get_value("data.X_original")
-    if X_orig_full is None:
-        return X_train.copy()
-    try:
-        out = X_orig_full.loc[X_train.index].copy()
-    except KeyError:
-        out = X_orig_full.iloc[: len(X_train)].copy()
-    return out.reindex(columns=X_train.columns)
-
-
-def _scale(df_orig: pd.DataFrame, X_train_scaled: pd.DataFrame,
-           scaler) -> pd.DataFrame:
-    """
-    Scale a DataFrame that is in original units → model-input units.
-    Only transforms numeric columns that the scaler was fitted on.
-    Returns a new DataFrame; does not mutate the input.
-    """
-    if scaler is None:
-        return df_orig.copy()
-    df_sc = df_orig.copy()
-    num_cols = X_train_scaled.select_dtypes(include="number").columns.tolist()
-    cols_present = [c for c in num_cols if c in df_sc.columns]
-    if cols_present:
-        df_sc[cols_present] = scaler.transform(df_sc[cols_present])
-    return df_sc
-
-
-def _attach_orig_features(scored: pd.DataFrame,
-                           orig_df: pd.DataFrame,
-                           feature_names: list[str]) -> pd.DataFrame:
-    """
-    Replace the (possibly scaled) feature columns in `scored` with the
-    original-scale values from `orig_df`, keeping all score columns intact.
-    Both DataFrames must have the same row order.
-    """
-    result = scored.copy()
-    for f in feature_names:
-        if f in orig_df.columns:
-            result[f] = orig_df[f].values
-    return result
-
-
-def _render_constraint_controls(features: list[str],
-                                 X_train_orig: pd.DataFrame) -> dict:
-    """
-    Render feature-bound inputs. X_train_orig MUST be in original units.
-    Returns feature_bounds dict with (lo, hi) per feature in original units.
+    Constraint expanders rendered inside the tab.
+    X_train must be in ORIGINAL (unscaled) units so min/max and user inputs
+    are physically meaningful (e.g. AOS 0–3%, not –2.1 – 1.4 std units).
     """
     st.markdown("### Constraint configuration")
 
     with st.expander("Feature bounds (optional overrides)", expanded=False):
         st.caption(
-            "Bounds are in **original units** — the same scale as your raw data. "
-            "Change any value and results update automatically."
+            "Bounds are in **original units** (unscaled). "
+            "Setting bounds restricts the synthetic design space AND filters "
+            "the recommended ranges. Change a value and the results update automatically."
         )
         feature_bounds: dict = {}
-        cols_ui = st.columns(2)
+        cols = st.columns(2)
         for i, feat in enumerate(features):
-            col_vals = pd.to_numeric(X_train_orig[feat], errors="coerce")
-            data_min = float(col_vals.min(skipna=True))
-            data_max = float(col_vals.max(skipna=True))
-            with cols_ui[i % 2]:
+            col_vals = pd.to_numeric(X_train[feat], errors="coerce")
+            data_min = float(col_vals.min())
+            data_max = float(col_vals.max())
+            with cols[i % 2]:
                 st.markdown(f"**{feat}**")
                 st.caption(f"Data range: {data_min:.3g} – {data_max:.3g}")
-                bc1, bc2 = st.columns(2)
-                lo = bc1.number_input(
-                    "Min", value=round(data_min, 3),
-                    key=f"lo_{feat}",
-                    label_visibility="collapsed",
+                c1, c2 = st.columns(2)
+                lo = c1.number_input(
+                    f"Min", value=round(data_min, 3),
+                    min_value=round(data_min - abs(data_min), 3),
+                    key=f"lo_{feat}", label_visibility="collapsed",
                     format="%.3f",
                 )
-                hi = bc2.number_input(
-                    "Max", value=round(data_max, 3),
-                    key=f"hi_{feat}",
-                    label_visibility="collapsed",
+                hi = c2.number_input(
+                    f"Max", value=round(data_max, 3),
+                    max_value=round(data_max + abs(data_max), 3),
+                    key=f"hi_{feat}", label_visibility="collapsed",
                     format="%.3f",
                 )
                 if lo > hi:
-                    st.error(f"Min > Max for {feat} — values swapped.")
+                    st.error(f"Min > Max for {feat} — swap them.")
                     lo, hi = hi, lo
                 feature_bounds[feat] = (lo, hi)
 
@@ -149,7 +101,9 @@ def _render_constraint_controls(features: list[str],
             mixture_cols  = st.multiselect("Columns that must sum to constant", features)
             mixture_total = st.number_input("Target sum", value=100.0, step=1.0)
             use_dirichlet = st.checkbox(
-                "Use Dirichlet sampling (ensures exact sum)", value=True,
+                "Use Dirichlet sampling (ensures exact sum)",
+                value=True,
+                help="Recommended — guarantees every sample satisfies the sum constraint.",
             )
 
     return {
@@ -173,17 +127,28 @@ def render():
 
     # ── Guards ────────────────────────────────────────────────────────────
     model     = get_value("model.object")
-    X_train   = get_value("split.X_train")   # SCALED — model input only
+    X_train   = get_value("split.X_train")   # scaled — used for model input only
     y         = get_value("data.y")
     task_type = get_value("model.task_type")
-    scaler    = get_value("preprocessing.scaler")
+    scaler    = get_value("preprocessing.scaler")   # None if no scaling was applied
 
     if model is None or X_train is None:
         st.warning("⚠️ No trained model found. Go to **🤖 Train** first.")
         st.stop()
 
-    # Unscaled training split — used for bound defaults, sampling reference
-    X_train_orig = _get_X_train_orig(X_train)
+    # X_orig_full: unscaled feature matrix for bounds, display, ranges
+    # Falls back to X_train if no scaler was used (they are identical then)
+    X_orig_full = get_value("data.X_original")
+    if X_orig_full is None:
+        X_orig_full = X_train.copy()   # no scaling → same data
+
+    # X_train_orig: unscaled version of the training split only
+    # We derive it from X_orig_full using the same row index as X_train
+    try:
+        X_train_orig = X_orig_full.loc[X_train.index].copy()
+    except Exception:
+        X_train_orig = X_orig_full.iloc[:len(X_train)].copy()
+    X_train_orig.columns = X_train.columns   # ensure same col names
 
     feature_names = (
         get_value("data.processed_feature_names")
@@ -191,18 +156,21 @@ def render():
         or list(X_train.columns)
     )
 
-    class_names: list[str] = []
+    # Build class_names / safe_idx
+    class_names = []
+    safe_idx    = 0
     if task_type == "classification" and y is not None:
         class_names = [str(c) for c in sorted(y.unique())]
 
     random_state = 42
 
-    # ── Target class / objective ──────────────────────────────────────────
+    # ── Target class / regression objective ───────────────────────────────
     if task_type == "classification":
         safe_class_idx = st.selectbox(
             "Target (safe) class",
             options=list(range(len(class_names))),
             format_func=lambda i: f"{i} – {class_names[i]}",
+            index=safe_idx,
         )
         safe_label = class_names[safe_class_idx] if class_names else "safe"
         objective  = "maximize"
@@ -211,29 +179,39 @@ def render():
         safe_label     = "optimal"
         objective      = st.radio("Objective", ["maximize", "minimize"], horizontal=True)
 
-    # ── Scoring parameters ────────────────────────────────────────────────
+    # ── Confidence threshold (sidebar moved here) ─────────────────────────
     st.markdown("### Scoring parameters")
     conf_thr = st.slider(
         "Confidence threshold (classification)",
         0.50, 0.99, 0.75, 0.01,
         key="safe_conf_thr",
+        help="Minimum predicted probability for a point to be flagged as 'safe'.",
         disabled=(task_type != "classification"),
     )
 
-    # ── Design space ──────────────────────────────────────────────────────
+    # ── Synthetic data toggle ─────────────────────────────────────────────
     st.markdown("### Design space exploration")
-    use_synth = st.toggle("Use synthetic design space", value=True)
+    use_synth = st.toggle(
+        "Use synthetic design space",
+        value=True,
+        help=(
+            "ON: generate synthetic formulations to map the full design space. "
+            "OFF: score only the real training data."
+        ),
+    )
 
     n_synth = 0
     if use_synth:
         n_synth = max(_MIN_SYNTH, st.number_input(
-            "Number of synthetic samples",
-            value=5000, min_value=100, max_value=50000, step=500, key="n_synth",
+            "Number of synthetic samples", value=5000, min_value=100, max_value=50000, step=500,
+            key="n_synth"
         ))
+        st.caption(f"Generating {n_synth:,} synthetic samples.")
     else:
         st.info("Synthetic sampling disabled — scoring real training data only.")
 
-    # ── Constraints (shown in original units) ─────────────────────────────
+    # ── Constraints ───────────────────────────────────────────────────────
+    # Pass unscaled data so bounds sliders show original units
     constraint_cfg = _render_constraint_controls(feature_names, X_train_orig)
     feature_bounds = constraint_cfg["feature_bounds"]
     mixture_cols   = constraint_cfg["mixture_cols"]
@@ -246,30 +224,18 @@ def render():
     )
 
     # ── Build data to score ───────────────────────────────────────────────
-    # We keep TWO parallel DataFrames:
-    #   data_orig   — original scale (for display, ranges, bounds filtering)
-    #   data_scaled — model-input scale (for scoring)
-    # They have identical row order throughout.
-
     if use_synth:
-        # Cache key includes bounds so any bound change busts the cache
         synth_key = (
             f"synth|{id(model)}|{n_synth}"
             f"|{str(sorted(feature_bounds.items()))}"
             f"|{str(mixture_cols)}|{mixture_total}|{use_dirichlet}|{random_state}"
         )
-        cache_key_orig   = synth_key + "|orig"
-        cache_key_scaled = synth_key + "|scaled"
-
-        if cache_key_orig not in st.session_state:
-            # Clear any stale synth caches
-            stale = [k for k in list(st.session_state.keys())
-                     if k.startswith("synth|")]
+        if synth_key not in st.session_state:
+            stale = [k for k in list(st.session_state.keys()) if k.startswith("synth|")]
             for k in stale:
                 del st.session_state[k]
-
             with st.spinner(f"Generating {n_synth:,} synthetic samples…"):
-                # Sample in ORIGINAL space using original-scale bounds
+                # Sample in ORIGINAL (unscaled) space so bounds match user input
                 if use_dirichlet and mixture_cols:
                     base = sample_dirichlet_mixture(
                         mixture_cols, feature_bounds, mixture_total,
@@ -284,91 +250,76 @@ def render():
                         )
                         for c in remaining:
                             base[c] = uni[c].values
-                    gen_orig = base[feature_names]
+                    generated = base[feature_names]
                 else:
-                    gen_orig = sample_uniform(
-                        X_train_orig, n_synth, feature_bounds, random_state
-                    )
-                    gen_orig = apply_constraints(gen_orig, feature_bounds, sum_constraint)
+                    generated = sample_uniform(X_train_orig, n_synth, feature_bounds, random_state)
+                    generated = apply_constraints(generated, feature_bounds, sum_constraint)
+                # Scale generated data before model scoring (if scaler exists)
+                if scaler is not None:
+                    import numpy as _np
+                    num_cols_sc = X_train.select_dtypes(include="number").columns.tolist()
+                    generated_scaled = generated.copy()
+                    generated_scaled[num_cols_sc] = scaler.transform(generated[num_cols_sc])
+                    generated = generated_scaled
+            st.session_state[synth_key] = generated
 
-                # Store original-scale version
-                st.session_state[cache_key_orig] = gen_orig
-
-                # Scale for model scoring — stored separately
-                gen_scaled = _scale(gen_orig, X_train, scaler)
-                st.session_state[cache_key_scaled] = gen_scaled
-
-        data_orig   = st.session_state[cache_key_orig]
-        data_scaled = st.session_state[cache_key_scaled]
-        source_label = "synthetic"
-
+        data_to_score = st.session_state[synth_key]
+        source_label  = "synthetic"
     else:
-        # Real training data — filter by bounds in original scale
-        data_orig = apply_constraints(
-            X_train_orig.copy(), feature_bounds, sum_constraint
-        )
-        if data_orig.empty:
-            st.warning("All real data excluded by bounds — widening bounds will restore data.")
-            data_orig = X_train_orig.copy()
-
-        # Scale for model
-        data_scaled = _scale(data_orig, X_train, scaler)
+        # Filter in original scale, then scale for model input
+        data_to_score_orig = apply_constraints(X_train_orig.copy(), feature_bounds, sum_constraint)
+        if data_to_score_orig.empty:
+            st.warning("All real data excluded by current bounds. Widening bounds will restore data.")
+            data_to_score_orig = X_train_orig.copy()
+        if scaler is not None:
+            num_cols_sc = X_train.select_dtypes(include="number").columns.tolist()
+            data_to_score = data_to_score_orig.copy()
+            data_to_score[num_cols_sc] = scaler.transform(data_to_score_orig[num_cols_sc])
+        else:
+            data_to_score = data_to_score_orig.copy()
         source_label = "experimental"
 
-    if data_orig.empty:
+    if data_to_score.empty:
         st.error("No data available to score. Check your constraints.")
         return
 
-    # ── Score (always uses scaled data for model) ─────────────────────────
+    # ── Helper: inverse-transform feature columns back to original scale ──
+    def _to_original_scale(df: "pd.DataFrame") -> "pd.DataFrame":
+        """Return df with feature columns in original (unscaled) units."""
+        if scaler is None:
+            return df
+        result = df.copy()
+        num_cols_sc = X_train.select_dtypes(include="number").columns.tolist()
+        feat_cols_present = [c for c in num_cols_sc if c in result.columns]
+        if feat_cols_present:
+            result[feat_cols_present] = scaler.inverse_transform(
+                result[feat_cols_present]
+            )
+        return result
+
+    # ── Score ─────────────────────────────────────────────────────────────
     if task_type == "classification":
-        scored_raw = score_synthetic_classification(
-            model, data_scaled, class_names, safe_class_idx
-        )
-        safe_all_raw, safe_hi_raw = filter_safe_classification(
-            scored_raw, safe_class_idx, conf_thr
-        )
-        score_col  = "safe_probability"
+        scored      = score_synthetic_classification(model, data_to_score, class_names, safe_class_idx)
+        safe_all, safe_hi = filter_safe_classification(scored, safe_class_idx, conf_thr)
+        score_col   = "safe_probability"
+        _X_orig     = get_value("data.X")
+        X_orig      = _X_orig if _X_orig is not None else X_train
         orig_labels = [str(v) for v in y.values] if y is not None else []
     else:
-        scored_raw = score_synthetic_regression(model, data_scaled, objective)
-        safe_hi_raw = filter_optimal_regression(scored_raw, top_pct=0.10)
-        safe_all_raw = scored_raw
-        score_col    = "predicted_value"
-        orig_labels  = [str(round(float(v), 2)) for v in y.values] if y is not None else []
+        scored      = score_synthetic_regression(model, data_to_score, objective)
+        safe_hi     = filter_optimal_regression(scored, top_pct=0.10)
+        safe_all    = scored
+        score_col   = "predicted_value"
+        _X_orig     = get_value("data.X")
+        X_orig      = _X_orig if _X_orig is not None else X_train
+        orig_labels = [str(round(float(v), 2)) for v in y.values] if y is not None else []
 
-    # ── Replace scaled feature columns with original-scale values ─────────
-    # Strategy: attach orig features to the FULL scored_raw first (same length
-    # as data_orig, so alignment is trivial), then re-filter to get safe subsets.
-    # This avoids any index alignment issue between subsets of different lengths.
-    data_orig_r  = data_orig.reset_index(drop=True)
-    scored_raw_r = scored_raw.reset_index(drop=True)
-
-    # Full scored df with original-scale feature columns
-    scored = _attach_orig_features(scored_raw_r, data_orig_r, feature_names)
-
-    # Re-filter safe_all and safe_hi from `scored` (now with orig-scale features).
-    # Column names match what score_synthetic_* actually produces:
-    #   classification: "pred_class_idx", "safe_probability", "safety_margin"
-    #   regression:     "predicted_value", "objective_score"
-    if task_type == "classification":
-        # safe_all = rows predicted as the target class
-        if "pred_class_idx" in scored.columns:
-            safe_all = scored[scored["pred_class_idx"] == safe_class_idx].copy()
-        else:
-            safe_all = scored.copy()
-        # safe_hi = safe_all rows above confidence threshold
-        if "safe_probability" in scored.columns:
-            safe_hi = safe_all[safe_all["safe_probability"] >= conf_thr].copy()
-        else:
-            safe_hi = safe_all.copy()
-    else:
-        safe_all = scored.copy()
-        # top 10 % by objective_score (mirrors filter_optimal_regression)
-        if "objective_score" in scored.columns and len(scored) > 0:
-            thresh  = scored["objective_score"].quantile(0.90)
-            safe_hi = scored[scored["objective_score"] >= thresh].copy()
-        else:
-            safe_hi = scored.copy()
+    # ── Inverse-transform scored data to original scale for display ─────
+    # The model was fed scaled data; now convert feature cols back so that
+    # recommended ranges, top-K table, plots all show original units.
+    scored  = _to_original_scale(scored)
+    safe_all = _to_original_scale(safe_all)
+    safe_hi  = _to_original_scale(safe_hi)
 
     # ── Summary metrics ───────────────────────────────────────────────────
     st.markdown("### Search summary")
@@ -379,29 +330,14 @@ def render():
 
     if safe_hi.empty:
         st.warning(
-            "No high-confidence safe samples found. "
-            "Try lowering the confidence threshold, widening bounds, "
-            "or enabling synthetic sampling."
+            "No high-confidence safe samples found. Try lowering the confidence threshold, "
+            "widening feature bounds, or enabling synthetic sampling."
         )
 
-    # ── Recommended ranges (original scale, filtered by user bounds) ──────
+    # ── Recommended ranges ────────────────────────────────────────────────
     st.markdown("### Recommended formulation ranges")
     source_df = safe_hi if not safe_hi.empty else safe_all
-
-    # Apply the user's bounds as a hard filter on the display data
-    # so the recommended ranges respect what the user set
-    filtered_source = source_df.copy()
-    for feat, (lo, hi) in feature_bounds.items():
-        if feat in filtered_source.columns:
-            col_num = pd.to_numeric(filtered_source[feat], errors="coerce")
-            filtered_source = filtered_source[(col_num >= lo) & (col_num <= hi)]
-
-    if filtered_source.empty:
-        st.warning("No samples remain after applying your bounds filter. "
-                   "Widening the bounds will show results.")
-        filtered_source = source_df  # fall back to unfiltered
-
-    ranges_df = build_recommended_ranges(filtered_source, feature_names)
+    ranges_df = build_recommended_ranges(source_df, feature_names)
     if not ranges_df.empty:
         st.dataframe(ranges_df.round(_DECIMAL_PLACES), use_container_width=True)
         st.code(format_recommendation_text(ranges_df, safe_label))
@@ -417,21 +353,23 @@ def render():
         if task_type == "classification"
         else ["objective_score"]
     )
-    top_df = filtered_source.sort_values(sort_by, ascending=False).head(top_k).copy()
+    top_df = source_df.sort_values(sort_by, ascending=False).head(top_k).copy()
     top_df.insert(0, "Rank", range(1, len(top_df) + 1))
     st.dataframe(top_df.round(_DECIMAL_PLACES), use_container_width=True)
 
     # ── 2D region map ─────────────────────────────────────────────────────
-    X_orig_display = get_value("data.X_original") or X_train_orig
     if len(feature_names) >= 2:
         st.markdown("### 2D region map")
-        r1, r2 = st.columns(2)
-        x2 = r1.selectbox("X axis", feature_names, key="map2_x")
-        y2 = r2.selectbox("Y axis", [f for f in feature_names if f != x2], key="map2_y")
+        c1, c2 = st.columns(2)
+        with c1:
+            x2 = st.selectbox("X axis", feature_names, key="map2_x")
+        with c2:
+            y2_opts = [f for f in feature_names if f != x2]
+            y2 = st.selectbox("Y axis", y2_opts, key="map2_y")
         color_col = "pred_class" if task_type == "classification" else "predicted_value"
         try:
             fig = plot_safe_region_2d(
-                scored, X_orig_display, orig_labels, x2, y2,
+                scored, X_orig, orig_labels, x2, y2,
                 color_col=color_col,
                 class_names=class_names if task_type == "classification" else None,
                 sample_n=n_synth if use_synth else len(scored),
@@ -444,10 +382,15 @@ def render():
     # ── 3D region map ─────────────────────────────────────────────────────
     if len(feature_names) >= 3:
         st.markdown("### 3D region map")
-        r1, r2, r3 = st.columns(3)
-        x3 = r1.selectbox("X", feature_names, key="map3_x")
-        y3 = r2.selectbox("Y", [f for f in feature_names if f != x3], key="map3_y")
-        z3 = r3.selectbox("Z", [f for f in feature_names if f not in [x3, y3]], key="map3_z")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            x3 = st.selectbox("X", feature_names, key="map3_x")
+        with c2:
+            y3_opts = [f for f in feature_names if f != x3]
+            y3 = st.selectbox("Y", y3_opts, key="map3_y")
+        with c3:
+            z3_opts = [f for f in feature_names if f not in [x3, y3]]
+            z3 = st.selectbox("Z", z3_opts, key="map3_z")
         try:
             fig = plot_safe_region_3d(
                 scored, x3, y3, z3,
@@ -468,17 +411,14 @@ def render():
     bo_results, bo_best = None, None
 
     if run_bo:
-        n_bo_calls = st.number_input(
-            "BO evaluations", value=50, min_value=10, max_value=300,
-            step=10, key="n_bo_calls",
-        )
+        n_bo_calls = st.number_input("BO evaluations", value=50, min_value=10, max_value=300, step=10, key="n_bo_calls")
         bo_key = f"bo_{id(model)}_{n_bo_calls}_{random_state}"
         if bo_key not in st.session_state:
             with st.spinner(f"Running {n_bo_calls} Bayesian evaluations…"):
                 bo_results, bo_best = bayesian_optimise(
                     model=model,
                     feature_cols=feature_names,
-                    X_ref=X_train_orig,   # reference in original scale
+                    X_ref=X_train,
                     feature_bounds=feature_bounds,
                     safe_class_idx=safe_class_idx,
                     class_names=class_names,
@@ -491,7 +431,7 @@ def render():
         bo_results, bo_best = st.session_state[bo_key]
 
         st.success("Bayesian optimisation complete.")
-        st.markdown("**Best point found (original scale):**")
+        st.markdown("**Best point found:**")
         st.json({k: round(v, _DECIMAL_PLACES) for k, v in bo_best.items()})
         if bo_results is not None and score_col in bo_results.columns:
             st.plotly_chart(plot_bo_history(bo_results, score_col), use_container_width=True)
@@ -501,11 +441,10 @@ def render():
     # ── Active Learning ───────────────────────────────────────────────────
     st.markdown("### 🔬 Active Learning — Next Experiment Suggestions")
     run_al = st.checkbox("Run Active Learning", value=False, key="run_al")
+    al_suggestions = None
 
     if run_al:
-        n_al = st.number_input(
-            "Suggestions", value=5, min_value=1, max_value=50, step=1, key="n_al"
-        )
+        n_al = st.number_input("Suggestions", value=5, min_value=1, max_value=50, step=1, key="n_al")
         al_method = st.selectbox(
             "Uncertainty method",
             ["entropy", "margin", "least_confident"],
@@ -516,7 +455,7 @@ def render():
             with st.spinner("Identifying most informative experiment candidates…"):
                 al_suggestions = suggest_next_experiments(
                     model=model,
-                    X_ref=X_train,          # model expects scaled input here
+                    X_ref=X_train,
                     feature_bounds=feature_bounds or None,
                     problem_type=task_type,
                     class_names=class_names,
@@ -529,8 +468,8 @@ def render():
         al_suggestions = st.session_state[al_key]
 
         st.info(
-            "These formulations have the **highest model uncertainty** — "
-            "running these experiments will most efficiently improve accuracy."
+            "These formulations have the **highest model uncertainty** — running these "
+            "experiments will most efficiently improve model accuracy."
         )
         st.dataframe(al_suggestions.round(_DECIMAL_PLACES), use_container_width=True)
 
@@ -542,9 +481,7 @@ def render():
         low_col  = next((c for c in cols_r if "Low"  in c), cols_r[1])
         high_col = next((c for c in cols_r if "High" in c), cols_r[3])
         insights = [
-            f"- **{row['Feature']}**: "
-            f"{row[low_col]:.3g} – {row[high_col]:.3g}  "
-            f"(median ≈ {row['Median']:.3g})"
+            f"- **{row['Feature']}**: {row[low_col]} – {row[high_col]}  (median ≈ {row['Median']})"
             for _, row in ranges_df.iterrows()
         ]
         mode_note = (
@@ -552,8 +489,8 @@ def render():
             else f"{len(scored):,} synthetic samples"
         )
         st.markdown(
-            f"For **'{safe_label}'** the model recommends:\n\n"
+            f"For class **'{safe_label}'** the model recommends:\n\n"
             + "\n".join(insights)
-            + f"\n\nRanges from **5th–95th percentile** of high-confidence safe region "
-              f"({mode_note}), filtered to your specified bounds."
+            + f"\n\nRanges derived from the **5th–95th percentile** of the high-confidence "
+              f"safe region ({mode_note}), giving a robust industrial operating window."
         )

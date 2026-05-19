@@ -28,20 +28,101 @@ def parse_time_to_minutes(col):
         return val * 60.0
     return val  # minutes
 
-def find_time_columns(df):
-    tcols = [c for c in df.columns if re.search(r'\btime\b', c, flags=re.IGNORECASE)]
-    times_min, keep_cols = [], []
-    for c in tcols:
-        tm = parse_time_to_minutes(c)
-        if np.isfinite(tm):
-            keep_cols.append(c)
-            times_min.append(tm)
-    order = np.argsort(times_min)
-    keep_cols = [keep_cols[i] for i in order]
-    times_min = np.array([times_min[i] for i in order], dtype=float)
-     
+import re
+import numpy as np
 
-    return keep_cols, times_min
+import re
+import numpy as np
+
+def parse_time_to_minutes(col_name):
+    """
+    Robust time parser:
+    Handles:
+    - Time (30m), Time(1h), time 0.5 h
+    - 0h, 1h, 30m
+    - Time-30m, t=30m
+    """
+
+    col = col_name.lower().strip()
+
+    # Strong pattern: number + explicit unit
+    match = re.search(r'(\d+\.?\d*)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b', col)
+    
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2)
+
+        if unit.startswith('h'):
+            return value * 60.0
+        else:
+            return value
+
+    # Fallback ONLY if column clearly looks like time
+    if re.search(r'\btime\b|\bt\s*=', col):
+        match_num = re.search(r'(\d+\.?\d*)', col)
+        if match_num:
+            return float(match_num.group(1))  # assume minutes
+
+    return np.nan
+
+
+import re
+import pandas as pd
+import numpy as np
+import streamlit as st
+
+def find_time_columns(df):
+    """
+    Identifies time-related columns, cleans asterisk markings, 
+    converts to numeric, and sorts them chronologically.
+    """
+    tcols = []
+    
+    for c in df.columns:
+        c_low = c.lower()
+        if (
+            re.search(r'\btime\b', c_low) or
+            re.match(r'^\s*\d+\.?\d*\s*(h|m|hr|mins|minutes|min)\b', c_low)
+        ):
+            tcols.append(c)
+
+    times_min, keep_cols = [], []
+
+    for col in tcols:
+        # 1. Clean the column: Remove '*' and convert to numeric
+        # We use regex=True to replace all asterisks with empty strings
+        # Removes any character that isn't a digit (0-9) or a decimal point (.)
+        df[col] = pd.to_numeric(
+            df[col].astype(str).str.replace(r'[^0-9.]', '', regex=True), 
+            errors='coerce'
+        )
+        
+        tm = parse_time_to_minutes(col)
+        if np.isfinite(tm):
+            keep_cols.append(col)
+            times_min.append(tm)
+
+    order = np.argsort(times_min)
+    sorted_cols = [keep_cols[i] for i in order]
+    sorted_times = np.array([times_min[i] for i in order], dtype=float)
+
+    # ✅ Streamlit info message with Type Check
+    if sorted_cols:
+        status_lines = []
+        for col, t in zip(sorted_cols, sorted_times):
+            # Check if the column is successfully converted to a numeric type
+            is_numeric = pd.api.types.is_numeric_dtype(df[col])
+            type_label = "Number (Pass)" if is_numeric else "Text (Fail)"
+            
+            status_lines.append(f"- {col} → {int(t)} min - Type: {type_label}")
+
+        info_msg = f"⏱️ **Detected {len(sorted_cols)} time columns (sorted ascending):**\n" + "\n".join(status_lines)
+        st.info(info_msg)
+    else:
+        st.warning("⚠️ No valid time columns detected.")
+        raise ValueError("No time-like columns found. Make sure headers contain 'Time (...)'.")
+
+    return sorted_cols, sorted_times
 
 # =========================================
 # 2) Fit helpers  (return R², yhat, params, eq, extra)
@@ -107,8 +188,6 @@ def fit_polynomial(t, y, degree=3):
 # =========================================
 def evaluate_rows(df, r2_threshold=0.80, poly_degree=POLY_DEGREE_DEFAULT):
     time_cols, times_min = find_time_columns(df)
-    if not time_cols:
-        raise ValueError("No time-like columns found. Make sure headers contain 'Time (...)'.")
 
     r2_lin_list, r2_exp_list, r2_poly_list = [], [], []
     eq_lin_list, eq_exp_list, eq_poly_list = [], [], []
@@ -335,14 +414,22 @@ def render():
                 method_choice = method_key_map[method_choice_ui]
                 result_with_hl, hl_col = compute_half_life_column(result, params, method_choice, unit="hours")
 
-                st.write("### 📈 Fit Summary (first 10 rows)")
-                st.dataframe(result_with_hl[[
-                    "r2_linear","r2_exp","r2_poly",
-                    "equ_linear","equ_exp","equ_poly",
-                    "best_model","HL method used", hl_col
-                ]].head(10))
+                # round the Results for better readability in the downloaded CSV
+                result_with_hl[hl_col] = (
+                    result_with_hl[hl_col]
+                    .replace([np.inf, -np.inf], np.nan)
+                    .round(2)
+                    .astype("float64")   # 👈 allows NaN safely
+                )
+
+                st.write("### 📈 Fit Summary")
+                st.dataframe(result_with_hl)
 
                 # Download
+                cols_to_remove = ["r2_linear", "r2_exp", "r2_poly",
+                                "equ_linear", "equ_exp", "equ_poly" , "HL method used"]
+
+                result_with_hl = result_with_hl.drop(columns=cols_to_remove, errors="ignore")
                 csv = result_with_hl.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     label="💾 Download CSV (R², equations, half-life)",

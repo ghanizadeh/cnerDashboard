@@ -11,6 +11,7 @@ concerned with presentation.
 from __future__ import annotations
 
 from typing import Optional
+from unittest import result
 
 import numpy as np
 import pandas as pd
@@ -115,17 +116,17 @@ def show_missing_textures_warning(missing: list[str]) -> None:
 # Download button
 # ---------------------------------------------------------------------------
 
-def show_download_button(
-    df: pd.DataFrame,
-    filename: str = "Foam_Performance_Index.csv",
-    label: str = "💾 Download Processed Data (all rows)",
-) -> None:
-    """Render a CSV download button for *df*."""
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
+def show_download_button(df: pd.DataFrame):
+    """
+    Converts the DataFrame to CSV and renders the Streamlit download button.
+    """
+    # Use 'utf-8-sig' to ensure Excel opens the CSV without 'Â' characters
+    csv_data = df.to_csv(index=False, encoding="utf-8-sig")
+    
     st.download_button(
-        label=label,
-        data=csv_bytes,
-        file_name=filename,
+        label="📥 Download Full Results (CSV)",
+        data=csv_data,
+        file_name="foam_performance_results.csv",
         mime="text/csv",
     )
 
@@ -145,10 +146,10 @@ def render_pipeline_results(result: PipelineResult) -> None:
     show_raw_preview(result.original_df, label="Raw input data (first 10 rows)")
     show_column_mapping(result.column_mapping)
     show_valid_samples_summary(result.original_df, result.original_valid_indices)
-    show_raw_preview(
-        result.valid_df_raw,
-        label="Valid samples (raw, before imputation)",
-    )
+    # show_raw_preview(
+    #     result.valid_df_raw,
+    #     label="Valid samples (raw, before imputation)",
+    # )
 
     # ---- Step 2 ----
     st.subheader("Step 2 – Impute Missing Foam Volumes")
@@ -168,6 +169,8 @@ def render_pipeline_results(result: PipelineResult) -> None:
     st.subheader("📊 Final Results with Performance Index")
     show_scored_results(result.scored_df)
     show_missing_textures_warning(result.missing_texture_labels)
+ 
 
     st.divider()
+    #csv_data = result.full_output_df.to_csv(index=False, encoding="utf-8-sig")
     show_download_button(result.full_output_df)

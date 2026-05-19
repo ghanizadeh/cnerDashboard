@@ -11,7 +11,8 @@ This file is responsible only for UI concerns:
 
 All business logic lives in ``foam_performance_calc_utility``.
 """
-
+import streamlit as st
+import pandas as pd
 import streamlit as st
 
 from utils.foam_performance_calc import PipelineConfig, run_pipeline
@@ -47,13 +48,25 @@ def show_foam_performance_calculator() -> None:
     # ------------------------------------------------------------------
     # File upload
     # ------------------------------------------------------------------
+    # Container for Foam Data
     with st.container(border=True):
-        foam_file = st.file_uploader("📑 Upload **Foam Data** (CSV)", type=["csv"])
+        foam_file = st.file_uploader("📁 Upload **Foam Data**", type=["csv", "xlsx"])
 
+        foam_sheet = None
+        if foam_file and foam_file.name.endswith('.xlsx'):
+            # Load the excel file to get sheet names
+            xl = pd.ExcelFile(foam_file)
+            foam_sheet = st.selectbox("📑 Select Foam Data Sheet", xl.sheet_names, key="foam_sheet")
+
+    # Container for Texture Weights
     with st.container(border=True):
-        texture_file = st.file_uploader(
-            "📑 Upload **Texture Weights** (CSV)", type=["csv"]
-        )
+        texture_file = st.file_uploader("📁 Upload **Texture Weights**", type=["csv", "xlsx"])
+        
+        texture_sheet = None
+        if texture_file and texture_file.name.endswith('.xlsx'):
+            # Load the excel file to get sheet names
+            xl_tex = pd.ExcelFile(texture_file)
+            texture_sheet = st.selectbox("Select Texture Sheet", xl_tex.sheet_names, key="tex_sheet")
 
     # ------------------------------------------------------------------
     # Options
@@ -78,6 +91,8 @@ def show_foam_performance_calculator() -> None:
                 result = run_pipeline(
                     foam_source=foam_file,
                     texture_weights_source=texture_file,
+                    foam_sheet=foam_sheet,
+                    texture_sheet=texture_sheet,
                     config=config,
                 )
             except ValueError as exc:

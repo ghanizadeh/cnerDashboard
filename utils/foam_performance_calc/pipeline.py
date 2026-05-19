@@ -32,7 +32,7 @@ import pandas as pd
 from .cleaners import clean_foam_columns
 from .column_mapping import map_day_columns
 from .imputers import fill_missing_foam_rowwise, fill_missing_textures
-from .io_utils import read_csv_safe
+from .io_utils import load_data_safe
 from .scoring import compute_performance, merge_scores_to_full, rename_to_day_format
 from .schemas import ColumnMapping, PipelineConfig, PipelineResult
 from .validators import filter_valid_samples
@@ -42,12 +42,15 @@ from .constants import R2_COLUMNS
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+from .io_utils import load_data_safe
 
 def run_pipeline(
-    foam_source: Union[str, io.IOBase],
-    texture_weights_source: Union[str, io.IOBase],
-    config: PipelineConfig,
-) -> PipelineResult:
+    foam_source,
+    texture_weights_source,
+    config,
+    foam_sheet=None,
+    texture_sheet=None,
+):
     """
     Execute the full foam performance calculation pipeline.
 
@@ -71,8 +74,8 @@ def run_pipeline(
     # ------------------------------------------------------------------
     # Stage 1–2: Read and normalise headers
     # ------------------------------------------------------------------
-    foam_df = read_csv_safe(foam_source)
-    texture_weights_df = read_csv_safe(texture_weights_source)
+    foam_df = load_data_safe(foam_source, sheet_name=foam_sheet)
+    texture_weights_df = load_data_safe(texture_weights_source, sheet_name=texture_sheet)
 
     # ------------------------------------------------------------------
     # Stage 3: Detect column mapping

@@ -36,98 +36,13 @@ from core.viz.eda import draw_boxplots
 from core.viz.style import fig_to_st
 from config.settings import DEFAULT_IQR_FACTOR, DEFAULT_ZSCORE_THRESHOLD
 from utils.data_filter import render_data_filters
-from core.data.foam_feature_engineering import GRP_CLR
-
-# ── Auto-ML–style group taxonomy (mirrors page_auto_ml.py) ───────────────────
-GROUPS: dict[str, list[str]] = {
-    "Nanoparticle": ["HS (%)", "BLH5 (%)", "HSA (%)"],
-    "Anionic":      ["AOS (%)", "alpha-step (%)", "a-step (%)", "SDS (%)", "SLES (%)",
-                     "n. LABS (%)", "DB45 (%)", "Cola SLAA (%)", "Cola SC (%)"],
-    "Nonionic":     ["APG (%)", "decyl glucoside (%)", "caprylyl glucoside (%)",
-                     "Tween 80 (%)", "PG (%)", "LAO (%)"],
-    "Zwitterionic": ["CapB (%)", "2C (%)", "Cola 2C (%)", "amine oxide (%)",
-                     "Cola LMB (%)", "Amphosol 1c (%)", "SC (%)",
-                     "LBHP (%)", "CS50(%)", "DM (%)"],
-    "Polymer":      ["HPAM (%)", "xanthan gum (%) ", "Guar Gum (%)", "FPAM (%)",
-                     "PAA (%)", "PA (%)", "ClearHib 1000 (%)"],
-    "Citric":       ["Citric (%)",
-                     "31.2(%) citric+ 13.3(%) KOH  (pH not adjusted, pH=4.46 )",
-                     "31.2% citric+ 13.3% KOH  (adjusted pH=4) (%)",
-                     "31.2% citric+ 13.3% KOH (not adjusted pH) (%)",   
-                     "31.2% citric+ 13.3% KOH (pH=4) (%)",
-                     "38.1% citric+   KOH  (pH=5) (%)",
-                     "potassium citrate (9.7%)/citric acid buffer (19.22%)  pH=3 (%)",
-                     "potassium citrate (%)"],
-    "Acid":         ["EDTA (%)", "etidronic acid (%)", "acetic acid (%)"],
-    "Antiscalant":  ["Mem 2000-clear tech (%)", "Mem 2500-clear tech (%)",
-                     "Mem 4000-clear tech (%)", "Mem 3500-clear tech (%)",
-                     "Mem 3000-clear tech (%)"],
-    "Brine":        ["Divalent", "Monovalent"],
-    "Oil":          ["Alkane (linear HC) ", "Aromatics", "Branched HC",
-                     "Light HC (up to C10)", "Sulfur content",
-                     "Acid & ester content", "Chlorinated components", "Polarity "],
-    "Process":      ["Temperature", "Dilution Ratio", "Oil (%)",
-                     "concentrate manufacturing method (Ratio)",
-                     "Initial Foam Temp (dilution Temp) "],
-}
-
-SUM_FEATURES: dict[str, str] = {
-    "Anionic (All Types)":      "Anionic",
-    "Nonionic (All Types)":     "Nonionic",
-    "Zwitterionic (All Types)": "Zwitterionic",
-    "Sum Surfactant":           "Surfactant",
-    "Nanoparticle (All Types)": "Nanoparticle",
-    "Polymer (All Types)":      "Polymer",
-    "Acid (All Types)":         "Acid",
-    "Citric (All Types)":       "Citric",
-}
-
-# Chemical groups: NaN = not added → fill 0
-CHEM_GROUPS_AUTO = {"Nanoparticle", "Anionic", "Nonionic", "Zwitterionic",
-                    "Polymer", "Citric", "Acid", "Antiscalant"}
-# Condition groups: NaN = unknown → drop row
-COND_GROUPS_AUTO = {"Brine", "Oil", "Process"}
-
-
-def _normalise(name: str) -> str:
-    s = str(name).strip().lower()
-    s = re.sub(r'\s*\(%\)\s*$', '', s).strip()
-    return s
-
-
-def _avail_auto(candidates: list[str], cols: list[str]) -> list[str]:
-    norm_to_col = {_normalise(c): c for c in cols}
-    matched, seen = [], set()
-    for cand in candidates:
-        key = _normalise(cand)
-        if key in norm_to_col:
-            actual = norm_to_col[key]
-            if actual not in seen:
-                matched.append(actual)
-                seen.add(actual)
-    return matched
-
-
-def _safe_num(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce")
-
-
-def _compute_sum_features(df: pd.DataFrame,
-                           sel_groups: dict[str, list[str]]) -> pd.DataFrame:
-    out = df.copy()
-    for feat_name, group_key in SUM_FEATURES.items():
-        cols = (sel_groups.get("Anionic", []) +
-                sel_groups.get("Nonionic", []) +
-                sel_groups.get("Zwitterionic", [])) \
-               if group_key == "Surfactant" \
-               else sel_groups.get(group_key, [])
-        present = [c for c in cols if c in out.columns]
-        if present:
-            s = pd.Series(0.0, index=out.index)
-            for c in present:
-                s += _safe_num(out[c]).fillna(0)
-            out[feat_name] = s
-    return out
+from core.data.foam_feature_engineering import (
+    build_foam_features,
+    render_feature_engineering_ui,
+    GRP_CLR, CHEM_GROUPS,
+    DEF_NANO, DEF_ANIONIC, DEF_NONION, DEF_ZW, DEF_POLY,
+    DEF_CITRIC, DEF_ACID, DEF_ANTI, DEF_BRINE, DEF_OIL, DEF_PROCESS,
+)
 
 
 
@@ -227,6 +142,37 @@ def _render_target_conversion(df: pd.DataFrame, target_col: str) -> pd.Series:
 
     return y_out
 
+
+def _render_data_filtering(data: pd.DataFrame) -> pd.DataFrame:
+    """Section 1: delegates to shared render_data_filters (utils/data_filter.py)."""
+    _section_header("🔍", 1, "Data Filtering",
+                    "Filter rows sent to the model. Each process condition has its own control. "
+                    "Filters are non-destructive — adjust any time.")
+    return render_data_filters(data, key_prefix="prep")
+
+
+def _render_feature_engineering(
+    df: pd.DataFrame,
+    selected_features: list[str],
+) -> tuple[pd.DataFrame, list[str], dict]:
+    """
+    Section 2 — delegates to shared render_feature_engineering_ui.
+    key_prefix="prep" keeps widget keys unique from EDA page.
+    """
+    _section_header("⚗️", 2, "Feature Engineering",
+                    "Select chemical groups — group totals, fractions and "
+                    "interactions are built automatically.")
+    df_out, feature_cols, fg = render_feature_engineering_ui(
+        df, key_prefix="prep", header=False,
+    )
+    # Save meta for Apply step
+    st.session_state["fe_meta"] = {
+        "feature_cols": feature_cols,
+        "feat_to_group": fg,
+    }
+    if not feature_cols:
+        return df, selected_features, {}
+    return df_out, feature_cols, fg
 
 
 
@@ -430,11 +376,7 @@ def render():
         st.warning("⚠️ Load data first — go to **📂 Data**.")
         st.stop()
 
-    all_cols = list(df_raw.columns)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Feature & Target Selection
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Feature / Target selection ────────────────────────────────────────
     st.markdown("### 📌 Feature & Target Selection")
     with st.expander("Select features and target column", expanded=True):
         selected_features, selected_target = render_column_selector(
@@ -448,9 +390,7 @@ def render():
         st.info("Select at least one feature and a target column above, then continue.")
         st.stop()
 
-    non_target = [c for c in all_cols if c != selected_target]
-
-    # Working data reset when selection changes
+    # ── Working data management ───────────────────────────────────────────
     sel_key = tuple(sorted(selected_features)) + (selected_target,)
     if sel_key != st.session_state.get("prep_selection_key") or "working_data_base" not in st.session_state:
         st.session_state.working_data_base      = df_raw[selected_features + [selected_target]].copy()
@@ -463,7 +403,7 @@ def render():
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION 1 — Target Conversion
+    # SECTION 0 — Target Conversion
     # ══════════════════════════════════════════════════════════════════════
     y_converted = _render_target_conversion(data, selected_target)
     task_mode   = st.session_state.get("tconv_task", "regression")
@@ -471,11 +411,9 @@ def render():
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION 2 — Data Filtering
+    # SECTION 1 — Data Filtering
     # ══════════════════════════════════════════════════════════════════════
-    _section_header("🔍", 2, "Data Filtering",
-                    "Filter rows sent to the model. Filters are non-destructive — adjust any time.")
-    data = render_data_filters(data, key_prefix="prep")
+    data = _render_data_filtering(data)
 
     # Align y to filtered rows
     y_converted = y_converted.loc[data.index].reset_index(drop=True)
@@ -484,358 +422,14 @@ def render():
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION 3 — Chemical Component Groups  (mirrors auto_ml step 4)
+    # SECTION 2 — Feature Engineering
     # ══════════════════════════════════════════════════════════════════════
-    _section_header("🧴", 3, "Chemical Component Groups",
-                    "Default columns pre-selected from uploaded file. Add or remove freely.")
-
-    sel_groups: dict[str, list[str]] = {}
-    grp_items = [g for g in GROUPS if g not in ("Oil", "Brine", "Process")]
-
-    with st.container():
-        cols_ui = st.columns(2)
-        for gi, grp in enumerate(grp_items):
-            with cols_ui[gi % 2]:
-                clr = GRP_CLR.get(grp, "#607D8B")
-                st.markdown(
-                    f'<span style="display:inline-block;padding:3px 10px;border-radius:12px;'
-                    f'font-size:0.75rem;font-weight:600;margin:2px;background:{clr}22;color:{clr};'
-                    f'border:1px solid {clr}66">{grp}</span>',
-                    unsafe_allow_html=True,
-                )
-                sel_groups[grp] = st.multiselect(
-                    f"Columns for {grp}",
-                    options=non_target,
-                    default=_avail_auto(GROUPS[grp], non_target),
-                    key=f"prep_grp_{grp}",
-                    label_visibility="collapsed",
-                )
-
-    st.markdown("##### 🌊 Brine & 🛢️ Oil compositions")
-    bp_cols = st.columns(2)
-    for ci, grp in enumerate(["Oil", "Brine"]):
-        with bp_cols[ci]:
-            clr = GRP_CLR.get(grp, "#607D8B")
-            st.markdown(
-                f'<span style="display:inline-block;padding:3px 10px;border-radius:12px;'
-                f'font-size:0.75rem;font-weight:600;margin:2px;background:{clr}22;color:{clr};'
-                f'border:1px solid {clr}66">{grp}</span>',
-                unsafe_allow_html=True,
-            )
-            sel_groups[grp] = st.multiselect(
-                f"Columns for {grp}",
-                options=non_target,
-                default=_avail_auto(GROUPS[grp], non_target),
-                key=f"prep_grp_{grp}",
-                label_visibility="collapsed",
-            )
-
-    st.markdown("##### ⚙️ Process Conditions")
-    st.caption("Select one column per process variable.")
-    NONE     = "(none)"
-    none_opt = [NONE] + non_target
-
-    pc1, pc2, pc3 = st.columns(3)
-    with pc1:
-        _def_temp = next((c for c in non_target
-                          if re.sub(r"\s+", " ", _normalise(c))
-                          in ("temperature", "temperature corrected", "temp")), NONE)
-        proc_temp = st.selectbox("🌡️ Temperature", none_opt,
-                                 index=none_opt.index(_def_temp) if _def_temp in none_opt else 0,
-                                 key="prep_proc_temp")
-    with pc2:
-        _def_dil = next((c for c in non_target
-                         if re.sub(r"\s+", " ", _normalise(c))
-                         in ("dilution ratio", "dilution ratio corrected", "dilution")), NONE)
-        proc_dil = st.selectbox("💧 Dilution Ratio", none_opt,
-                                index=none_opt.index(_def_dil) if _def_dil in none_opt else 0,
-                                key="prep_proc_dil")
-    with pc3:
-        _def_oilpct = next((c for c in non_target
-                            if re.sub(r"\s+", " ", _normalise(c))
-                            in ("oil", "oil percent", "oil pct")), NONE)
-        proc_oil_pct = st.selectbox("🛢️ Oil Percent (%)", none_opt,
-                                    index=none_opt.index(_def_oilpct) if _def_oilpct in none_opt else 0,
-                                    key="prep_proc_oil_pct")
-
-    sel_groups["Process"] = [c for c in [proc_temp, proc_dil, proc_oil_pct] if c != NONE]
-
-    # Warn about % columns not assigned
-    _all_selected = set(c for cols in sel_groups.values() for c in cols)
-    _pct_unassigned = [c for c in non_target if "%" in str(c) and c not in _all_selected]
-    if _pct_unassigned:
-        st.warning(
-            f"⚠️ **{len(_pct_unassigned)} column(s) containing '%' not assigned to any group** "
-            "and will be excluded:\n\n" + "\n".join(f"- `{c}`" for c in _pct_unassigned)
-        )
+    data, feature_cols, fg = _render_feature_engineering(data, selected_features)
 
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION 4 — Computed Features  (mirrors auto_ml step 5)
-    # ══════════════════════════════════════════════════════════════════════
-    _section_header("⚗️", 4, "Computed Features",
-                    "Auto-computed group sums + correlation-winner ratio/sum pairs + custom features.")
-
-    df_work       = _compute_sum_features(data, sel_groups)
-    computed_sums = [f for f in SUM_FEATURES if f in df_work.columns]
-
-    if computed_sums:
-        pills = " ".join(
-            f'<span style="display:inline-block;padding:3px 10px;border-radius:12px;'
-            f'font-size:0.75rem;font-weight:600;margin:2px;background:#e3f2fd;color:#1565C0;'
-            f'border:1px solid #90caf9">{s}</span>'
-            for s in computed_sums
-        )
-        st.markdown("**Auto-computed sums:**")
-        st.markdown(pills, unsafe_allow_html=True)
-
-    # Custom engineered features
-    user_ratios: list[tuple[str, str, str]] = []
-    avail_for_ratio = list(dict.fromkeys(non_target + computed_sums))
-
-    with st.expander("🧪 Custom Engineered Features", expanded=False):
-        st.caption("Create new features by combining two columns with + or /")
-        n_custom = st.number_input("Number of custom engineered features",
-                                   0, 20, 0, 1, key="prep_n_custom")
-        for ri in range(int(n_custom)):
-            st.markdown(f"**Custom Feature #{ri+1}**")
-            cc1, cc2, cc3 = st.columns([5, 2, 5])
-            c1_sel = cc1.selectbox("Component 1", avail_for_ratio, key=f"prep_cf_c1_{ri}")
-            op_sel = cc2.selectbox("Operation",   ["+", "/"],       key=f"prep_cf_op_{ri}")
-            c2_sel = cc3.selectbox("Component 2", avail_for_ratio, key=f"prep_cf_c2_{ri}")
-            user_ratios.append((c1_sel, op_sel, c2_sel))
-
-    for _c1, _op, _c2 in user_ratios:
-        _fname_fe = f"{_c1} {_op} {_c2}"
-        if _c1 in df_work.columns and _c2 in df_work.columns and _fname_fe not in df_work.columns:
-            df_work[_fname_fe] = (df_work[_c1] + df_work[_c2] if _op == "+"
-                                  else df_work[_c1] / df_work[_c2].replace(0, float("nan")))
-    ratio_cols = [f"{c1} {op} {c2}" for c1, op, c2 in user_ratios
-                  if f"{c1} {op} {c2}" in df_work.columns]
-
-    # Must-have ratio/sum pairs — winner selected by |correlation| with target
-    _oil_pct_col = proc_oil_pct if proc_oil_pct != NONE else None
-
-    MUST_HAVE_RATIOS: list[tuple[str, str]] = [
-        ("Anionic (All Types)",      "Sum Surfactant"),
-        ("Nonionic (All Types)",     "Sum Surfactant"),
-        ("Zwitterionic (All Types)", "Sum Surfactant"),
-        ("Nanoparticle (All Types)", "Sum Surfactant"),
-        ("Polymer (All Types)",      "Sum Surfactant"),
-        ("Acid (All Types)",         "Sum Surfactant"),
-        ("Citric (All Types)",       "Sum Surfactant"),
-    ]
-    if _oil_pct_col and _oil_pct_col in df_work.columns:
-        MUST_HAVE_RATIOS += [
-            (_oil_pct_col, "Sum Surfactant"),
-            (_oil_pct_col, "Nanoparticle (All Types)"),
-        ]
-
-    EXCLUDED_IX = {
-        "Anionic (All Types) + Nonionic (All Types)",
-        "Anionic (All Types) + Zwitterionic (All Types)",
-        "Nonionic (All Types) + Anionic (All Types)",
-        "Nonionic (All Types) + Zwitterionic (All Types)",
-        "Zwitterionic (All Types) + Anionic (All Types)",
-        "Zwitterionic (All Types) + Nonionic (All Types)",
-        "Anionic (All Types) / Nonionic (All Types)",
-        "Anionic (All Types) / Zwitterionic (All Types)",
-        "Nonionic (All Types) / Anionic (All Types)",
-        "Nonionic (All Types) / Zwitterionic (All Types)",
-        "Zwitterionic (All Types) / Anionic (All Types)",
-        "Zwitterionic (All Types) / Nonionic (All Types)",
-    }
-
-    _y_for_corr   = _safe_num(df_work[selected_target])
-    _corr_report: list[dict] = []
-    _best_cols:   list[str]  = []
-
-    def _corr_with_target(s: pd.Series) -> float:
-        both = s.notna() & _y_for_corr.notna()
-        if both.sum() < 5:
-            return 0.0
-        return float(s[both].corr(_y_for_corr[both]))
-
-    for _num, _den in MUST_HAVE_RATIOS:
-        if _num == _den:
-            continue
-        if _num not in df_work.columns or _den not in df_work.columns:
-            continue
-        _sum_name   = f"{_num} + {_den}"
-        _ratio_name = f"{_num} / {_den}"
-        if _sum_name not in df_work.columns:
-            df_work[_sum_name]   = df_work[_num] + df_work[_den]
-        if _ratio_name not in df_work.columns:
-            df_work[_ratio_name] = df_work[_num] / df_work[_den].replace(0, float("nan"))
-        _r_sum   = _corr_with_target(df_work[_sum_name])
-        _r_ratio = _corr_with_target(df_work[_ratio_name])
-        if abs(_r_sum) >= abs(_r_ratio):
-            _winner, _loser  = _sum_name,   _ratio_name
-            _r_win,  _r_lose = _r_sum,      _r_ratio
-        else:
-            _winner, _loser  = _ratio_name, _sum_name
-            _r_win,  _r_lose = _r_ratio,    _r_sum
-        if _winner not in EXCLUDED_IX:
-            _best_cols.append(_winner)
-        _corr_report.append({
-            "Pair":        f"{_num}  ×  {_den}",
-            "Winner":      _winner,
-            "Winner r":    round(_r_win,       4),
-            "Winner |r|":  round(abs(_r_win),  4),
-            "Loser":       _loser,
-            "Loser r":     round(_r_lose,      4),
-            "Loser |r|":   round(abs(_r_lose), 4),
-        })
-
-    _user_feat_cols = [f"{c1} {op} {c2}" for c1, op, c2 in user_ratios
-                       if f"{c1} {op} {c2}" in df_work.columns]
-    all_ratio_cols = list(dict.fromkeys(
-        [c for c in _best_cols if c not in EXCLUDED_IX] + _user_feat_cols
-    ))
-
-    if _corr_report:
-        st.markdown("**Auto-computed ratio/sum features** — winner selected by |correlation| with target:")
-
-        def _style_row(row):
-            return [
-                "background-color:#e8f5e9;font-weight:bold"
-                if col in ("Winner", "Winner r", "Winner |r|")
-                else "color:#aaaaaa"
-                for col in row.index
-            ]
-
-        _rdf = pd.DataFrame(_corr_report)
-        st.dataframe(
-            _rdf.style.apply(_style_row, axis=1)
-                .format({"Winner r": "{:+.4f}", "Winner |r|": "{:.4f}",
-                         "Loser r":  "{:+.4f}", "Loser |r|":  "{:.4f}"}),
-            use_container_width=True,
-            hide_index=True,
-        )
-        if all_ratio_cols:
-            _ratio_pills = " ".join(
-                f'<span style="display:inline-block;padding:3px 10px;border-radius:12px;'
-                f'font-size:0.75rem;font-weight:600;margin:2px;background:#fff8e1;color:#795548;'
-                f'border:1px solid #bcaaa4">{c}</span>'
-                for c in all_ratio_cols
-            )
-            st.markdown("**Selected features (winners + custom):**")
-            st.markdown(_ratio_pills, unsafe_allow_html=True)
-
-    # Build final feature_cols and fg for downstream steps
-    all_feature_cols = list(dict.fromkeys(
-        c for g, cols in sel_groups.items() for c in cols
-    ))
-    feature_cols = list(dict.fromkeys(
-        all_feature_cols + computed_sums + all_ratio_cols
-    ))
-    feature_cols = [c for c in feature_cols if c in df_work.columns and c != selected_target]
-    fg = {}  # group mapping for overview chart
-    for grp, cols in sel_groups.items():
-        for col in cols:
-            fg[col] = grp
-    for f in computed_sums:
-        fg[f] = "Sum"
-    for f in all_ratio_cols:
-        fg[f] = "Interaction"
-
-    # Use df_work as the working data from here on
-    data = df_work.copy()
-
-    # Re-align y_converted to data index (data may have been filtered)
-    y_converted = y_converted.loc[data.index].reset_index(drop=True)
-    data        = data.reset_index(drop=True)
-
-    st.divider()
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION 5 — NaN Handling  (mirrors auto_ml step 6)
-    # ══════════════════════════════════════════════════════════════════════
-    _section_header("🧩", 5, "NaN Handling",
-                    "Choose how missing values in chemical groups are treated before modelling.")
-
-    with st.container(border=True):
-        st.caption(
-            "**Chemical groups** (Surfactant, Nanoparticle, Polymer, Citric, "
-            "Acid, Antiscalant): choose how missing values are treated.  "
-            "All other columns (Brine, Oil, Process, Target) always drop the row."
-        )
-        nh1, nh2 = st.columns([2, 3])
-        chem_nan_strategy = nh1.radio(
-            "Chemical group NaN strategy",
-            options=["fill_zero", "drop_row"],
-            format_func=lambda x: {
-                "fill_zero": "✅ Fill with 0  (not added to formulation)",
-                "drop_row":  "🗑️ Drop row  (treat as missing experiment)",
-            }[x],
-            index=0,
-            key="prep_chem_nan_strategy",
-        )
-        with nh2:
-            if chem_nan_strategy == "fill_zero":
-                st.info(
-                    "**Fill with 0:** A missing surfactant or nanoparticle concentration "
-                    "means the chemical was not added. The row is kept; NaN → 0."
-                )
-            else:
-                st.warning(
-                    "**Drop row:** Any row where a selected chemical group column "
-                    "is NaN will be removed. Use when missing = unreliable measurement."
-                )
-
-        # Impact preview
-        all_chem_cols_sel = [c for g in CHEM_GROUPS_AUTO for c in sel_groups.get(g, [])
-                             if c in data.columns]
-        if all_chem_cols_sel:
-            n_rows_with_nan = data[all_chem_cols_sel].isnull().any(axis=1).sum()
-            n_total = len(data)
-            if chem_nan_strategy == "fill_zero":
-                st.caption(
-                    f"**{n_rows_with_nan:,}** rows have at least one chemical NaN "
-                    f"({100*n_rows_with_nan/max(n_total,1):.1f}%) → will be filled with 0.  "
-                    f"All **{n_total:,}** rows kept."
-                )
-            else:
-                st.caption(
-                    f"**{n_rows_with_nan:,}** rows have at least one chemical NaN "
-                    f"({100*n_rows_with_nan/max(n_total,1):.1f}%) → will be dropped.  "
-                    f"**{n_total - n_rows_with_nan:,}** rows remain."
-                )
-        else:
-            st.caption("No chemical group columns selected yet.")
-
-    # Apply NaN strategy immediately so outlier removal sees clean data
-    chem_cols_present = [c for g in CHEM_GROUPS_AUTO for c in sel_groups.get(g, [])
-                         if c in data.columns]
-    cond_cols_present = [c for g in COND_GROUPS_AUTO for c in sel_groups.get(g, [])
-                         if c in data.columns]
-
-    if chem_nan_strategy == "fill_zero":
-        for col in chem_cols_present:
-            data[col] = _safe_num(data[col]).fillna(0)
-        # Also fill derived sum/ratio features that come from chem columns
-        for col in feature_cols:
-            if col in data.columns and (" + " in col or " / " in col):
-                data[col] = _safe_num(data[col]).fillna(0)
-        for col in computed_sums:
-            if col in data.columns:
-                data[col] = _safe_num(data[col]).fillna(0)
-    else:
-        if chem_cols_present:
-            data = data.dropna(subset=chem_cols_present)
-
-    if cond_cols_present:
-        data = data.dropna(subset=cond_cols_present)
-
-    # Re-align y after NaN drops
-    y_converted = y_converted.loc[data.index].reset_index(drop=True)
-    data        = data.reset_index(drop=True)
-
-    st.divider()
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SECTION 6 — Outlier Removal
+    # SECTION 3 — Outlier Removal
     # ══════════════════════════════════════════════════════════════════════
     data = _render_outlier_removal(data, feature_cols)
 
@@ -846,28 +440,42 @@ def render():
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION 7 — Scaling
+    # SECTION 4 — Scaling
     # ══════════════════════════════════════════════════════════════════════
     scaling_strategy = _render_scaling(feature_cols)
 
     st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION 8 — Final Overview
+    # SECTION 5 — Final Overview
     # ══════════════════════════════════════════════════════════════════════
-    feat_cols_final = list(dict.fromkeys(
-        c for c in feature_cols if c in data.columns and c != selected_target
-    ))
+    # Build X from feature_cols only (drop target if present)
+    # ── Include BOTH original selected features + engineered features ──
+
+    engineered_cols = [
+        c for c in feature_cols
+        if c in data.columns and c != selected_target
+    ]
+
+    original_cols = [
+        c for c in selected_features
+        if c in data.columns and c != selected_target
+    ]
+
+    # Combine while preserving order and removing duplicates
+    #feat_cols_final = list(dict.fromkeys(original_cols + engineered_cols))
+    feat_cols_final = list(dict.fromkeys(engineered_cols))
 
     X_preview = data[feat_cols_final].copy()
 
-    #_render_final_overview(X_preview, y_converted, fg, task_mode)
-    #st.divider()
+    _render_final_overview(X_preview, y_converted, fg, task_mode)
+
+    st.divider()
 
     # ══════════════════════════════════════════════════════════════════════
-    # SECTION 9 — Unscaled Data Preview
+    # SECTION 6 — Unscaled Data Preview
     # ══════════════════════════════════════════════════════════════════════
-    _section_header("🔬", 5, "Unscaled Data Preview",
+    _section_header("🔬", 6, "Unscaled Data Preview",
                     "Inspect the final dataset in original units before any scaling. "
                     "Use this to verify filters, engineered features and outlier removal are correct.")
 
@@ -937,58 +545,58 @@ def render():
         st.dataframe(display_df, use_container_width=True, height=420)
 
         # ── Descriptive stats ─────────────────────────────────────────────
-        # with st.expander("📈 Descriptive statistics (unscaled)"):
-        #     num_prev = display_df.select_dtypes(include="number").columns.tolist()
-        #     if num_prev:
-        #         desc = display_df[num_prev].describe().T
-        #         desc["missing %"] = (
-        #             display_df[num_prev].isnull().mean() * 100
-        #         ).round(2)
-        #         st.dataframe(
-        #             desc.style
-        #                 .format("{:.4f}", na_rep="—")
-        #                 .background_gradient(subset=["missing %"], cmap="Oranges"),
-        #             use_container_width=True,
-        #         )
-        #     else:
-        #         st.info("No numeric columns in current selection.")
+        with st.expander("📈 Descriptive statistics (unscaled)"):
+            num_prev = display_df.select_dtypes(include="number").columns.tolist()
+            if num_prev:
+                desc = display_df[num_prev].describe().T
+                desc["missing %"] = (
+                    display_df[num_prev].isnull().mean() * 100
+                ).round(2)
+                st.dataframe(
+                    desc.style
+                        .format("{:.4f}", na_rep="—")
+                        .background_gradient(subset=["missing %"], cmap="Oranges"),
+                    use_container_width=True,
+                )
+            else:
+                st.info("No numeric columns in current selection.")
 
         # ── Distribution spot-check ───────────────────────────────────────
-        # with st.expander("📊 Distribution spot-check"):
-        #     num_opts = [c for c in sel_prev_cols
-        #                 if pd.api.types.is_numeric_dtype(X_preview[c])]
-        #     cat_opts = ["(none)"] + [
-        #         c for c in display_df.columns
-        #         if not pd.api.types.is_numeric_dtype(display_df[c])
-        #     ]
-        #     sp1, sp2 = st.columns([2, 3])
-        #     if num_opts:
-        #         spot_col   = sp1.selectbox("Feature to plot", num_opts, key="preview_spot_col")
-        #         color_col  = sp2.selectbox("Colour by",       cat_opts, key="preview_spot_color")
-        #         import plotly.express as _px
-        #         if color_col == "(none)":
-        #             fig_sp = _px.histogram(
-        #                 display_df, x=spot_col, nbins=40,
-        #                 title=f"Distribution of  {spot_col}  (original scale)",
-        #                 template="plotly_white",
-        #                 color_discrete_sequence=["#1565C0"],
-        #             )
-        #         else:
-        #             fig_sp = _px.histogram(
-        #                 display_df, x=spot_col, color=color_col,
-        #                 nbins=40, barmode="overlay", opacity=0.7,
-        #                 title=f"{spot_col}  by  {color_col}",
-        #                 template="plotly_white",
-        #             )
-        #         fig_sp.update_layout(height=300, margin=dict(t=40, b=10, l=10, r=10))
-        #         st.plotly_chart(fig_sp, use_container_width=True)
-        #     else:
-        #         st.info("No numeric columns selected.")
+        with st.expander("📊 Distribution spot-check"):
+            num_opts = [c for c in sel_prev_cols
+                        if pd.api.types.is_numeric_dtype(X_preview[c])]
+            cat_opts = ["(none)"] + [
+                c for c in display_df.columns
+                if not pd.api.types.is_numeric_dtype(display_df[c])
+            ]
+            sp1, sp2 = st.columns([2, 3])
+            if num_opts:
+                spot_col   = sp1.selectbox("Feature to plot", num_opts, key="preview_spot_col")
+                color_col  = sp2.selectbox("Colour by",       cat_opts, key="preview_spot_color")
+                import plotly.express as _px
+                if color_col == "(none)":
+                    fig_sp = _px.histogram(
+                        display_df, x=spot_col, nbins=40,
+                        title=f"Distribution of  {spot_col}  (original scale)",
+                        template="plotly_white",
+                        color_discrete_sequence=["#1565C0"],
+                    )
+                else:
+                    fig_sp = _px.histogram(
+                        display_df, x=spot_col, color=color_col,
+                        nbins=40, barmode="overlay", opacity=0.7,
+                        title=f"{spot_col}  by  {color_col}",
+                        template="plotly_white",
+                    )
+                fig_sp.update_layout(height=300, margin=dict(t=40, b=10, l=10, r=10))
+                st.plotly_chart(fig_sp, use_container_width=True)
+            else:
+                st.info("No numeric columns selected.")
 
         # ── Download ──────────────────────────────────────────────────────
         st.download_button(
-            "⬇️ Download as CSV",
-            data=X_preview.to_csv(index=False).encode(),
+            "⬇️ Download this view as CSV",
+            data=display_df.to_csv(index=False).encode(),
             file_name="unscaled_preview.csv",
             mime="text/csv",
         )
@@ -1045,10 +653,10 @@ def render():
         set_state("data.X",                         X)
         set_state("data.X_original",                X_original)   # unscaled for plots
         set_state("data.y",                         y)
-        set_state("data.feature_names",             feat_cols_final)
+        set_state("data.feature_names",             selected_features)
         set_state("data.target_name",               selected_target)
         set_state("data.processed_feature_names",   list(X.columns))
-        set_state("preprocessing.missing_strategy", chem_nan_strategy)
+        set_state("preprocessing.missing_strategy", "none")
         set_state("preprocessing.outlier_method",
                   st.session_state.get("prep_outlier_params", {}).get("method", "none")
                   if st.session_state.get("prep_confirmed_outlier") else "none")
@@ -1059,8 +667,8 @@ def render():
         set_state("preprocessing.rows_after",       len(pipeline_data))
         set_state("preprocessing.applied",          True)
         set_state("model.task_type",                task_type)
-        set_state("preprocessing.feature_engineering_enabled", True)
-        set_state("preprocessing.feature_engineering_meta",    {"feature_cols": feat_cols_final, "feat_to_group": fg})
+        set_state("preprocessing.feature_engineering_enabled", st.session_state.get("fe_enabled", False))
+        set_state("preprocessing.feature_engineering_meta",    st.session_state.get("fe_meta", {}))
         set_state("preprocessing.feat_to_group",               fg)
 
         st.success("✅ Preprocessing complete and saved to session!")

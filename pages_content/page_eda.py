@@ -1,14 +1,32 @@
 """
 pages_content/page_eda.py
 Exploratory Data Analysis — fully decoupled from preprocessing.
-Reuses components and core/viz/eda.py functions.
+
+Tabs
+----
+  1  Preview
+  2  Data Filtering          ← shared render_data_filters (same as preprocessing)
+  3  Feature Engineering     ← foam groups + auto-interactions for EDA only
+  4  Summary
+  5  Scatter + Histograms
+  6  3D Scatter
+  7  Box Plots
+  8  Correlation
+  9  Categorical
 """
 
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
 import streamlit as st
 import matplotlib.pyplot as plt
-import math
 from sklearn.preprocessing import StandardScaler
-from state.session import init_state, get_value, set_state
+
+from state.session import init_state, get_value
 from components.column_selector import render_column_selector
 from core.data.preprocessor import (
     extended_describe, categorical_summary,
@@ -21,7 +39,79 @@ from core.viz.eda import (
 )
 from core.viz.style import fig_to_st
 from config.settings import MAX_HEATMAP_FEATURES
-import pandas as pd
+from utils.data_filter import render_data_filters
+from core.data.foam_feature_engineering import (
+    render_feature_engineering_ui,
+    GRP_CLR, CHEM_GROUPS,
+)
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  EDA Feature Engineering tab — delegates to shared render_feature_engineering_ui
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_fe_tab(df_sub: pd.DataFrame, target: str) -> pd.DataFrame:
+    """
+    Render the EDA Feature Engineering tab using the same shared UI as the
+    Preprocessing page (key_prefix="eda" keeps widget keys isolated).
+    Returns df_sub with engineered columns merged in (EDA-only, not saved).
+    """
+    st.markdown(
+        "Configure chemical groups below. Click **▶ Apply to EDA dataset** "
+        "to add the engineered features to the current EDA session — "
+        "**no changes are saved to preprocessing or the model**."
+    )
+
+    df_out, feature_cols, fg = render_feature_engineering_ui(
+        df_sub, key_prefix="eda", header=False,
+    )
+
+    st.divider()
+    if st.button(
+        "▶ Apply to EDA dataset",
+        type="primary",
+        use_container_width=True,
+        key="eda_fe_apply",
+        help="Adds engineered columns to the EDA dataset for this session only. "
+             "Does NOT affect preprocessing or model training.",
+    ):
+        df_merged = df_sub.copy().reset_index(drop=True)
+        for col in feature_cols:
+            if col in df_out.columns and col not in df_merged.columns:
+                df_merged[col] = df_out[col].values
+        st.session_state["eda_enriched_df"] = df_merged
+        st.session_state["eda_fe_applied"]  = True
+        st.success(
+            f"✅ Added **{len(feature_cols)}** engineered features to EDA dataset. "
+            "All other EDA tabs now show these features too."
+        )
+        st.rerun()
+
+    # Return enriched df if already applied and shape matches, else original
+    if st.session_state.get("eda_fe_applied") and "eda_enriched_df" in st.session_state:
+        enriched = st.session_state["eda_enriched_df"]
+        if len(enriched) == len(df_sub):
+            st.caption(
+                f"🟢 Engineered features are active — EDA dataset has "
+                f"**{enriched.shape[1]}** columns."
+            )
+            if st.button("↩ Remove engineered features", key="eda_fe_reset"):
+                st.session_state.pop("eda_enriched_df", None)
+                st.session_state["eda_fe_applied"] = False
+                st.rerun()
+            return enriched
+        else:
+            st.session_state.pop("eda_enriched_df", None)
+            st.session_state["eda_fe_applied"] = False
+
+    return df_sub
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Main render
+# ─────────────────────────────────────────────────────────────────────────────
 
 def render():
     init_state()
@@ -44,277 +134,316 @@ def render():
             key_prefix="eda",
         )
 
-    # EDA is read-only — do NOT persist selections to shared state.
-    # Column selections here are local to EDA only.
-
     if not features or target is None:
         st.info("Select at least one feature and a target column above.")
         st.stop()
 
-    selected_cols = features + [target]
-    df_sub = df[selected_cols].copy()
+    selected_cols = list(dict.fromkeys(features + [target]))
+    df_base = df[selected_cols].copy()
 
     # ── EDA tabs ──────────────────────────────────────────────────────────
     st.divider()
     st.subheader("🔎 EDA Dashboard")
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8  = st.tabs(
-        ["🔎 Preview", "Data Filtering", "📝 Summary", "📊 Scatter + Histograms", "📊 3D Scatter plots", "📦 Box plots", "🔗 Correlation", "⚠️ Categorical" ]
-    )
+
+    (tab_prev, tab_filt, tab_fe, tab_sum,
+     tab_scat, tab_3d, tab_box, tab_corr, tab_cat) = st.tabs([
+        "🔎 Preview",
+        "🔍 Data Filtering",
+        "⚗️ Feature Engineering",
+        "📝 Summary",
+        "📊 Scatter + Histograms",
+        "🧊 3D Scatter",
+        "📦 Box Plots",
+        "🔗 Correlation",
+        "⚠️ Categorical",
+    ])
 
     # ── Tab 1: Preview ────────────────────────────────────────────────────
-    with tab1:
-        st.write(f"**Shape:** {df_sub.shape[0]:,} rows × {df_sub.shape[1]} cols")
-        st.dataframe(df_sub, use_container_width=True)
+    with tab_prev:
+        st.write(f"**Shape:** {df_base.shape[0]:,} rows × {df_base.shape[1]} cols")
+        st.dataframe(df_base, use_container_width=True)
 
-    # ── Tab 2: Data Filtering ────────────────────────────────────────────────────
-    with tab2:
-        st.subheader("🔍 Optional Filtering Before Cleaning")
-        # Normalize column names for case-insensitive matching
-        df_cols_lower = {col.lower(): col for col in df_sub.columns}
-        # 🔥 Smart column finder
-        def find_column(df_cols_lower, keywords):
-            for col_lower, original_col in df_cols_lower.items():
-                if all(k in col_lower for k in keywords):
-                    return original_col
-            return None
-        # 🔥 Define filters with fallback logic
-        filter_cols = {
-            "Concentrate Ratio": find_column(df_cols_lower, ["concentrate", "ratio"]),
-            "Dilution Ratio": find_column(df_cols_lower, ["dilution", "ratio"]),
-            "Brine Type": find_column(df_cols_lower, ["brine", "type"]),
-            "Brine Name": find_column(df_cols_lower, ["brine", "name"]),
-        }
+    # ── Tab 2: Data Filtering ─────────────────────────────────────────────
+    with tab_filt:
+        st.subheader("🔍 Filter Rows for EDA")
+        st.caption(
+            "Filters here affect all EDA tabs below — they do **not** touch "
+            "the preprocessing pipeline or model data."
+        )
+        # Use the shared filter widget (eda-namespaced keys)
+        df_sub = render_data_filters(df_base, key_prefix="eda")
 
-        for label, actual_col in filter_cols.items():
+        # Store filtered df in session so other tabs can use it
+        st.session_state["eda_filtered_df"] = df_sub
 
-            if actual_col is None:
-                #st.warning(f"⚠️ No column found for **{label}**")
-                continue
+        # Reset FE enrichment when filter changes (shape mismatch guard)
+        if st.session_state.get("eda_fe_applied"):
+            enriched = st.session_state.get("eda_enriched_df")
+            if enriched is not None and len(enriched) != len(df_sub):
+                st.session_state.pop("eda_enriched_df", None)
+                st.session_state["eda_fe_applied"] = False
+                st.info("ℹ️ Filter changed — engineered features reset. Re-apply in the Feature Engineering tab.")
 
-            # 🔥 Inform user if fallback happened
-            if label.lower() not in actual_col.lower():
-                st.info(f"ℹ️ Using detected column for {label}: **{actual_col}**")
+    # Resolve working df for all downstream tabs
+    # Priority: FE-enriched → filtered → base
+    if st.session_state.get("eda_fe_applied") and "eda_enriched_df" in st.session_state:
+        df_work = st.session_state["eda_enriched_df"]
+    elif "eda_filtered_df" in st.session_state:
+        df_work = st.session_state["eda_filtered_df"]
+    else:
+        df_work = df_base
 
-            unique_vals = df_sub[actual_col].dropna().unique()
+    # Resolve feature list for df_work
+    work_features = [c for c in df_work.columns if c != target]
+    num_cols      = [c for c in work_features if pd.api.types.is_numeric_dtype(df_work[c])]
 
-            if len(unique_vals) > 1:
-                st.markdown(f"**Filter by {actual_col}:**")
+    # ── Tab 3: Feature Engineering ────────────────────────────────────────
+    with tab_fe:
+        st.subheader("⚗️ Feature Engineering — EDA Exploration")
+        # Pass the currently filtered (not enriched) df so the FE tab
+        # always starts from raw features, not stacked engineered ones
+        filt_df = st.session_state.get("eda_filtered_df", df_base)
+        df_work = _render_fe_tab(filt_df, target)
 
-                selected_vals = st.multiselect(
-                    f"Choose {actual_col} values to keep",
-                    options=unique_vals,
-                    default=list(unique_vals),
-                    key=f"eda_filter_{actual_col}"   # eda-namespaced key — never collides with preprocessing
-                )
-
-                df_sub = df_sub[df_sub[actual_col].isin(selected_vals)]
-
-                st.info(
-                    f"✅ Filtered {actual_col}: {len(selected_vals)} values selected → {len(df_sub)} rows remain."
-                )
-
-            else:
-                st.warning(f"⚠️ {actual_col} has only one unique value — no filtering applied.")
-
-        # Update after filtering
-        st.success(f"✅ Data filtered successfully. Original Shape: {df.shape} - Current shape: {df_sub.shape}")
-
-
-    # ── Tab 3: Statistical summary ────────────────────────────────────────
-    with tab3:
+    # ── Tab 4: Summary ────────────────────────────────────────────────────
+    with tab_sum:
         st.markdown("#### 🔢 Numeric Summary")
-        st.dataframe(extended_describe(df_sub), use_container_width=True)
-
-        cat_df = categorical_summary(df_sub)
+        st.dataframe(extended_describe(df_work), use_container_width=True)
+        cat_df = categorical_summary(df_work)
         if not cat_df.empty:
             st.markdown("#### 🏷️ Categorical Summary")
             st.dataframe(cat_df, use_container_width=True)
 
-    # ── Tab 4: Scatter + Histograms ─────────────────────────────────────────────
-    with tab4:
-        num_cols = [c for c in features if pd.api.types.is_numeric_dtype(df_sub[c])]
-        if not num_cols:
-            st.warning("No numeric feature columns available for distribution plots.")
-        else:
+    # ── Tab 5: Scatter + Histograms ───────────────────────────────────────
+    with tab_scat:
+        num_cols_work = [c for c in work_features
+                         if c in df_work.columns
+                         and pd.api.types.is_numeric_dtype(df_work[c])]
 
+        if not num_cols_work:
+            st.warning("No numeric feature columns available.")
+        else:
             st.markdown("#### 🔄 Scatter + Marginal Histograms")
-            num_cols = [c for c in features if pd.api.types.is_numeric_dtype(df_sub[c])]
-            if not num_cols:
-                st.warning("No numeric feature columns available.")
+            y_s = df_work[target]
+            n_classes = y_s.dropna().nunique()
+
+            if pd.api.types.is_numeric_dtype(y_s) and n_classes > 5:
+                st.success("Detected: Regression")
+                show_trend = st.checkbox("Show R² trendline", value=True, key="eda_trend")
+                # ---- Select top correlated features ----
+                corr_df = df_work[num_cols_work + [target]].copy()
+
+                # Correlation with target
+                corr_vals = (
+                    corr_df.corr(numeric_only=True)[target]
+                    .drop(target, errors="ignore")
+                    .abs()
+                    .sort_values(ascending=False)
+                )
+
+                # Top 16 most correlated features
+                top_features = corr_vals.head(16).index.tolist()
+
+                # Data used for plotting
+                plot_df = df_work[top_features + [target]]
+
+                figs = draw_pairwise_scatter_with_hist(
+                    plot_df,
+                    target,
+                    show_trend
+                )
+            elif n_classes <= 3:
+                y_enc, mapping = pd.factorize(y_s)
+                df_plot = df_work.copy()
+                df_plot[target] = y_enc
+                st.info(f"Detected: Classification ({n_classes} classes) — "
+                        f"mapping: {dict(enumerate(mapping))}")
+                # ---- Select top correlated features ----
+                corr_df = df_plot[num_cols_work + [target]].copy()
+
+                corr_vals = (
+                    corr_df.corr(numeric_only=True)[target]
+                    .drop(target, errors="ignore")
+                    .abs()
+                    .sort_values(ascending=False)
+                )
+
+                top_features = corr_vals.head(16).index.tolist()
+
+                plot_df = df_plot[top_features + [target]]
+
+                figs = draw_pairwise_scatter_with_hist(
+                    plot_df,
+                    target,
+                    False
+                )
             else:
-                y = df_sub[target]  # use filtered df_sub to keep index aligned
-                unique_classes = y.dropna().unique()
-                n_classes = len(unique_classes)
-                # =========================
-                # CASE 1: Regression
-                # =========================
-                if pd.api.types.is_numeric_dtype(y) and n_classes > 5:
-                    st.success("Detected: Regression")
-                    show_trendline = st.checkbox("Show R² trendline", value=True, key="scatter_trendline")
-                    figs = draw_pairwise_scatter_with_hist(
-                        df_sub[num_cols + [target]],
-                        target,
-                        show_trendline
-                    )
-                # =========================
-                # CASE 2: Classification (2–3 classes)
-                # =========================
-                elif n_classes <= 3:
-                    
-                    # 🔥 Convert target for plotting
-                    y_encoded, mapping = pd.factorize(y)
-                    df_plot = df_sub.copy()
-                    df_plot[target] = y_encoded
-                    st.info(f"Detected: Classification ({n_classes} classes) --- Class mapping: {dict(enumerate(mapping))}")
-                    show_trendline = False
-                    figs = draw_pairwise_scatter_with_hist(
-                        df_plot[num_cols + [target]],
-                        target,
-                        show_trendline
-                    )
-                # =========================
-                # CASE 3: Too many classes
-                # =========================
-                else:
-                    st.warning(
-                        f"⚠️ Target has {n_classes} classes. "
-                        "Scatter plots are disabled for >3 classes."
-                    )
-                    figs = []
-                if not figs:
-                    st.info("Not enough data to render plots.")
-                else:
-                    for row_start in range(0, len(figs), 2):
-                        cols = st.columns(2)
-                        for col_idx, fig in enumerate(figs[row_start : row_start + 2]):
-                            with cols[col_idx]:
-                                fig_to_st(fig)
+                st.warning(f"⚠️ Target has {n_classes} classes — scatter disabled for >3.")
+                figs = []
+
+            if figs:
+                for row_start in range(0, len(figs), 2):
+                    cols_ui = st.columns(2)
+                    for ci, fig in enumerate(figs[row_start: row_start+2]):
+                        with cols_ui[ci]:
+                            fig_to_st(fig)
+            else:
+                st.info("Not enough data to render plots.")
+
+            # st.divider()
+            # st.markdown("#### 📊 Histograms")
+            # bins = st.slider("Histogram bins", 5, 100, 30, key="eda_bins")
+            # fig_h = draw_histograms(df_work, num_cols_work, bins=bins)
+            # fig_to_st(fig_h)
+
+            # st.divider()
+            # st.markdown("#### 🟢 All Features vs Target")
+            # plot_all_one = st.checkbox("One combined figure", value=True, key="eda_all_one")
+            # if not plot_all_one:
+            #     for feat in num_cols_work:
+            #         fig_s = draw_scatter(df_work, feat, target, hue_col=None)
+            #         fig_to_st(fig_s)
+            # else:
+            #     n     = len(num_cols_work)
+            #     ncols = 3
+            #     nrows = math.ceil(n / ncols)
+            #     fig, axes = plt.subplots(nrows, ncols, figsize=(6*ncols, 5*nrows))
+            #     axes = axes.flatten()
+            #     for i, feat in enumerate(num_cols_work):
+            #         pdf = df_work[[feat, target]].dropna()
+            #         xv  = pd.to_numeric(pdf[feat],   errors="coerce")
+            #         yv  = pd.to_numeric(pdf[target],  errors="coerce")
+            #         ok  = xv.notna() & yv.notna()
+            #         axes[i].scatter(xv[ok], yv[ok], alpha=0.6, s=18)
+            #         axes[i].set_xlabel(feat, fontsize=8)
+            #         axes[i].set_ylabel(target, fontsize=8)
+            #         axes[i].set_title(f"{feat} vs {target}", fontsize=9)
+            #     for j in range(i+1, len(axes)):
+            #         fig.delaxes(axes[j])
+            #     plt.tight_layout()
+            #     fig_to_st(fig)
+
+    # ── Tab 6: 3D Scatter ─────────────────────────────────────────────────
+    with tab_3d:
+        num_cols_3d = [c for c in df.columns
+                       if pd.api.types.is_numeric_dtype(df[c])]
+
+        enable_3d = st.checkbox("Enable Interactive Scatter", value=True, key="eda_3d_enable")
+        if enable_3d:
+            st.markdown("#### 🧊 2D Interactive Scatter")
+            if len(num_cols_3d) >= 2:
+                ca, cb, cc = st.columns(3)
+                xi = ca.selectbox("X", num_cols_3d, index=0, key="i2d_x")
+                yi = cb.selectbox("Y", num_cols_3d, index=min(1,len(num_cols_3d)-1), key="i2d_y")
+                co_opts = ["None"] + df.columns.tolist()
+                co_def  = co_opts.index(target) if target in co_opts else 0
+                ci = cc.selectbox("Colour by", co_opts, index=co_def, key="i2d_c")
+                if ci == "None": ci = None
+                hov_opts = [c for c in df.columns if c not in [xi, yi]]
+                hov_cols = st.multiselect("Hover columns", hov_opts,
+                                           default=[target] if target in hov_opts else hov_opts[:2],
+                                           key="i2d_hov")
+                keep = list(dict.fromkeys([xi, yi]
+                             + ([ci] if ci else [])
+                             + [c for c in hov_cols if c not in [xi, yi, ci]]))
+                pdf = df[keep].copy()
+                if ci and not pd.api.types.is_numeric_dtype(pdf[ci]):
+                    pdf[ci] = pdf[ci].astype(str)
+                fig2d = px.scatter(pdf, x=xi, y=yi, color=ci,
+                                    hover_data={c: True for c in hov_cols},
+                                    color_continuous_scale="Viridis"
+                                    if ci and pd.api.types.is_numeric_dtype(pdf[ci]) else None,
+                                    opacity=0.75, height=500)
+                fig2d.update_traces(marker=dict(size=6))
+                fig2d.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+                st.plotly_chart(fig2d, use_container_width=True)
+            else:
+                st.warning("Need ≥ 2 numeric columns.")
 
             st.divider()
-            st.markdown("#### 📊 Histograms")
-            bins = st.slider("Histogram bins", 5, 100, 30, key="eda_bins")
-            fig = draw_histograms(df_sub, num_cols, bins=bins)
-            fig_to_st(fig)
-            st.divider()
-
-            st.markdown("#### 🟢 Scatter Plot - All Features vs Target")
-            # Checkbox option
-            plot_all_one = st.checkbox("Show all features in one figure",value=True,key="eda_scatter_all_one")
-            # --------------------------------------------------
-            # OPTION 1 — Separate figures (your current style)
-            # --------------------------------------------------
-            if not plot_all_one:
-                for feature in num_cols:
-                    fig = draw_scatter(
-                        df_sub,
-                        x_col=feature,
-                        y_col=target,
-                        hue_col=None
-                    )
-                    fig_to_st(fig)
-            # -------------------------------------------------
-            # OPTION 2 — One image with subplots
-            # --------------------------------------------------
+            st.markdown("#### 🧊 3D Interactive Scatter")
+            if len(num_cols_3d) >= 3:
+                ca, cb, cc, cd = st.columns(4)
+                xi = ca.selectbox("X", num_cols_3d, index=0, key="i3d_x")
+                yi = cb.selectbox("Y", num_cols_3d, index=min(1,len(num_cols_3d)-1), key="i3d_y")
+                zi = cc.selectbox("Z", num_cols_3d, index=min(2,len(num_cols_3d)-1), key="i3d_z")
+                co_opts = ["None"] + df.columns.tolist()
+                co_def  = co_opts.index(target) if target in co_opts else 0
+                ci = cd.selectbox("Colour by", co_opts, index=co_def, key="i3d_c")
+                if ci == "None": ci = None
+                hov_opts = [c for c in df.columns if c not in [xi, yi, zi]]
+                hov_cols = st.multiselect("Hover columns", hov_opts,
+                                           default=[target] if target in hov_opts else hov_opts[:2],
+                                           key="i3d_hov")
+                keep = list(dict.fromkeys([xi, yi, zi]
+                             + ([ci] if ci else [])
+                             + [c for c in hov_cols if c not in [xi, yi, zi, ci]]))
+                pdf = df[keep].copy()
+                if ci and not pd.api.types.is_numeric_dtype(pdf[ci]):
+                    pdf[ci] = pdf[ci].astype(str)
+                fig3d = px.scatter_3d(pdf, x=xi, y=yi, z=zi, color=ci,
+                                       hover_data={c: True for c in hov_cols},
+                                       color_continuous_scale="Viridis"
+                                       if ci and pd.api.types.is_numeric_dtype(pdf[ci]) else None,
+                                       opacity=0.75, height=650)
+                fig3d.update_traces(marker=dict(size=4))
+                fig3d.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+                st.plotly_chart(fig3d, use_container_width=True)
             else:
-                n = len(num_cols)
-                cols = 3
-                rows = math.ceil(n / cols)
-                fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 5*rows))
-                axes = axes.flatten()
-                for i, feature in enumerate(num_cols):
-                    ax = axes[i]
-                    # Drop NaNs and coerce to numeric to avoid matplotlib
-                    # category-axis errors when target contains mixed types
-                    plot_df = df_sub[[feature, target]].dropna()
-                    x_vals = pd.to_numeric(plot_df[feature], errors="coerce")
-                    y_vals = pd.to_numeric(plot_df[target],  errors="coerce")
-                    valid  = x_vals.notna() & y_vals.notna()
-                    ax.scatter(x_vals[valid], y_vals[valid], alpha=0.7)
-                    ax.set_xlabel(feature)
-                    ax.set_ylabel(target)
-                    ax.set_title(f"{feature} vs {target}")
-                # Remove empty axes
-                for j in range(i+1, len(axes)):
-                    fig.delaxes(axes[j])
-                plt.tight_layout()
-                fig_to_st(fig)
+                st.warning("Need ≥ 3 numeric columns.")
 
-
-    # ── Tab 5: 3D Scatter ───────────────────────────────────────────────
-    with tab5:
-        st.markdown("#### 📊 3D Scatter Plots")
-        if len(num_cols) >= 2:
-            c1, c2, c3 = st.columns(3)
-            # X axis
-            x_col = c1.selectbox("X axis",num_cols,key="eda_3d_x")
-            # Y axis
-            y_col = c2.selectbox("Y axis",num_cols,index=1,key="eda_3d_y")
-            # Color column (default = target)
-            color_options = ["None"] + df_sub.columns.tolist()
-            default_index = color_options.index(target) if target in color_options else 0
-            hue_col = c3.selectbox("Color by",color_options,index=default_index,key="eda_3d_color")
-            if hue_col == "None":
-                hue_col = None
-            # 🔥 FIX: ensure column names are strings
-            fig = draw_scatter(df_sub, x_col, y_col, hue_col=hue_col)
-            fig_to_st(fig)
- 
-    # ── Tab 6: Boxplots ───────────────────────────────────────────────
-    with tab6:
+    # ── Tab 7: Box Plots ──────────────────────────────────────────────────
+    with tab_box:
         st.markdown("#### 📦 Boxplots")
-        use_standardize = st.checkbox("Standardize features for visualization (recommended when scales differ)",value=False)
-        df_plot = df_sub.copy()
-        if use_standardize:
-            scaler = StandardScaler()
-            df_plot[num_cols] = scaler.fit_transform(df_sub[num_cols])
-        fig = draw_boxplots(df_plot, num_cols)
-        fig_to_st(fig)
-        st.divider()
-
-    # ── Tab 7: Correlation ────────────────────────────────────────────────
-    with tab7:
-        st.markdown("### 🟣 Correlation Matrix")
-        num_cols = [c for c in features if pd.api.types.is_numeric_dtype(df_sub[c])]
-        if not num_cols:
-            st.warning("No numeric features available for correlation analysis.")
-        elif len(num_cols) > MAX_HEATMAP_FEATURES:
-            st.warning(
-                f"⚠️ Too many numeric features ({len(num_cols)}) — "
-                f"heatmap limited to {MAX_HEATMAP_FEATURES}. "
-                "Showing raw correlation table only."
-            )
-            st.dataframe(df_sub[num_cols].corr(), use_container_width=True)
+        num_w = [c for c in work_features
+                 if c in df_work.columns and pd.api.types.is_numeric_dtype(df_work[c])]
+        use_std = st.checkbox("Standardise for visualization", value=False, key="eda_box_std")
+        df_plot = df_work.copy()
+        if use_std and num_w:
+            df_plot[num_w] = StandardScaler().fit_transform(df_work[num_w])
+        if num_w:
+            fig_bp = draw_boxplots(df_plot, num_w)
+            fig_to_st(fig_bp)
         else:
-            st.dataframe(df_sub[num_cols + [target]].corr(), use_container_width=True)
-            fig, corr, rec, high_corr = draw_correlation_heatmap(
-                df_sub,
-                columns=num_cols + [target],
-                target=target
+            st.info("No numeric feature columns.")
+
+    # ── Tab 8: Correlation ────────────────────────────────────────────────
+    with tab_corr:
+        st.markdown("### 🟣 Correlation Matrix")
+        num_w = [c for c in work_features
+                 if c in df_work.columns and pd.api.types.is_numeric_dtype(df_work[c])]
+        if not num_w:
+            st.warning("No numeric features.")
+        elif len(num_w) > MAX_HEATMAP_FEATURES:
+            st.warning(f"Too many features ({len(num_w)}) — showing table only.")
+            st.dataframe(df_work[num_w].corr(), use_container_width=True)
+        else:
+            st.dataframe(df_work[num_w + [target]].corr(), use_container_width=True)
+            fig_hm, corr, rec, high_corr = draw_correlation_heatmap(
+                df_work, columns=num_w + [target], target=target
             )
-            fig_to_st(fig)
+            fig_to_st(fig_hm)
             st.markdown("### ⭐ Recommended Features")
             if rec is not None:
                 st.dataframe(rec, use_container_width=True)
-            st.markdown("### ⚠️ Highly Correlated Features")
+            st.markdown("### ⚠️ Highly Correlated Feature Pairs")
             if not high_corr.empty:
                 st.dataframe(high_corr, use_container_width=True)
             else:
                 st.success("No severe multicollinearity detected.")
 
-    # ── Tab 8: Categorical diagnostics ───────────────────────────────────
-    with tab8:
-        warn_df = categorical_warnings(df_sub)
+    # ── Tab 9: Categorical ────────────────────────────────────────────────
+    with tab_cat:
+        warn_df = categorical_warnings(df_work)
         if warn_df.empty:
             st.success("✅ No major categorical issues detected.")
         else:
             st.dataframe(warn_df, use_container_width=True)
-
         with st.expander("📊 Class Imbalance Details"):
-            imb_df = categorical_imbalance(df_sub)
+            imb_df = categorical_imbalance(df_work)
             if imb_df.empty:
                 st.info("No categorical columns found.")
             else:
                 st.dataframe(imb_df, use_container_width=True)
 
-    # EDA is purely read-only — no shared state is written here.
     st.info("👉 Proceed to **⚙️ Preprocessing** when ready.")

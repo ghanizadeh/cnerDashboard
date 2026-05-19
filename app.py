@@ -42,7 +42,8 @@ init_state()
 # ── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
     try:
-        st.image(LOGO_PATH, use_container_width=True)
+
+        st.image("logo.png", use_container_width=True)
     except Exception:
         st.title(f"{APP_ICON} Cnergreen ML Dashboard")
 
@@ -104,8 +105,11 @@ with st.sidebar:
         st.markdown("#### Tools")
         sub_selection = option_menu(
             menu_title=None,
-            options=["Foam Performance Calculator" ,"Foam Half-Life Calculator", "Foam Stability (14/30 days)"],
-            icons=["calculator", "calculator", "calculator"],
+            options=["Foam Performance Calculator" ,"Foam Half-Life Calculator", 
+                     "Foam Stability (14/30 days)", "Automatic 2D/3D Plotter",
+                     "Data Extraction", "Automatic AI Report"],
+            icons=["calculator", "calculator", "calculator", "graph-up", 
+                   "file-earmark-spreadsheet", "file-text"],
             default_index=0,
             key="extra_tool_menu",
             styles={
@@ -150,10 +154,6 @@ elif main_menu == "Model":
         from pages_content.page_predict import render
         render()
 
-    #elif sub_selection == "🧠 Explainability":
-    #    from pages_content.page_explainability import render
-    #    render()
-
     elif sub_selection == "Safe Region & Optimizer":
         from pages_content.page_safe_region import render
         render()
@@ -168,7 +168,16 @@ elif main_menu == "Extra Tool":
     if sub_selection == "Foam Stability (14/30 days)":
         from pages_content.dilution_stability_calculator import render
         render()
-        
+    if sub_selection == "Automatic 2D/3D Plotter":
+        from pages_content.Page_auto_eda import render
+        render()
+    if sub_selection == "Data Extraction":
+        #from pages_content.data_extraction import render
+        from core.data.extraction.noOil_extraction import render
+        render()
+    if sub_selection == "Automatic AI Report":
+        from pages_content.page_auto_ml import render
+        render()
 # ── Home / fallback ────────────────────────────────────────────────────────
 if main_menu not in ("Data", "EDA", "Preprocessing", "Model", "Extra Tool"):
     col1, col2, col3 = st.columns([1, 2, 1])
