@@ -105,7 +105,7 @@ with st.sidebar:
         st.markdown("#### Tools")
         sub_selection = option_menu(
             menu_title=None,
-            options=["Automatic AI Report", "Automatic 2D/3D Plotter", "Foam Performance Calculator" ,"Foam Half-Life Calculator", 
+            options=["Automatic 2D/3D Plotter", "Automatic AI Report", "Foam Performance Calculator" ,"Foam Half-Life Calculator", 
                      "Foam Stability (14/30 days)", "Data Extraction" ],
             icons=["calculator", "calculator", "calculator", "graph-up", 
                    "file-earmark-spreadsheet", "file-text"],
