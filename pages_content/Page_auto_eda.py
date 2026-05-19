@@ -35,7 +35,7 @@ GROUPS: dict[str, list[str]] = {
         "HS (%)", "BLH5 (%)", "HSA (%)",
     ],
     "Anionic": [
-        "AOS (%)", "alpha-step (%)", "SDS (%)", "SLES (%)",
+        "AOS (%)", "alpha-step (%)", "a-step (%)", "SDS (%)", "SLES (%)",
         "n. LABS (%)", "DB45 (%)", "Cola SLAA (%)", "Cola SC (%)",
     ],
     "Nonionic": [
@@ -55,6 +55,9 @@ GROUPS: dict[str, list[str]] = {
         "31.2(%) citric+ 13.3(%) KOH  (pH not adjusted, pH=4.46 )",
         "31.2% citric+ 13.3% KOH  (adjusted pH=4) (%)",
         "38.1% citric+   KOH  (pH=5) (%)",
+        "31.2% citric+ 13.3% KOH (not adjusted pH) (%)",
+        "31.2% citric+ 13.3% KOH (pH=4) (%)",
+
         "potassium citrate (9.7%)/citric acid buffer (19.22%)  pH=3 (%)",
         "potassium citrate (%)",
     ],
@@ -75,7 +78,7 @@ GROUPS: dict[str, list[str]] = {
         "Acid & ester content", "Chlorinated components", "Polarity ",
     ],
     "Process": [
-        "Temperature", "Dilution Ratio", "Oil  (%)",
+        "Temperature", "Dilution Ratio", "Oil (%)",
         "concentrate manufacturing method (Ratio)",
         "Initial Foam Temp (dilution Temp) ",
     ],
@@ -441,7 +444,7 @@ def generate_all_plots(
     SF2 — all ratio_cols  (must-have + user-defined), self skipped
     SF3 — oil_cols only; X = individual components + ratio features
     """
-    SF1 = "Effect of individual component to each other on half life"
+    SF1 = "Effect of individual component to each other on Target"
     SF2 = "Effect of component Ratio to individual components"
     SF3 = "Effect of component Ratio and individual component to oil properties"
 
