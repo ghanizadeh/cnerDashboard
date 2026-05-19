@@ -768,8 +768,8 @@ def render():
     df_raw = _load(raw_bytes, is_excel, sheet_name)
     st.success(f"✅  **{len(df_raw):,} rows × {df_raw.shape[1]} columns**")
 
-    with st.expander("Preview raw data (first 5 rows)"):
-        st.dataframe(df_raw.head(5), use_container_width=True)
+    with st.expander("Preview raw data"):
+        st.dataframe(df_raw, use_container_width=True)
 
     all_cols = list(df_raw.columns)
     st.divider()
